@@ -10,12 +10,15 @@ Code Base currently has the v1 CLI and TUI workflows implemented. The project ca
 
 The remaining gaps are polish-level: richer terminal Markdown rendering and deeper TUI visual/interaction refinement.
 
+The implementation is now organized as a library crate with small binary entrypoints and internal modules for storage/config, TUI/tree/editor/doc helpers, and tests.
+
 ## Status By Area
 
 | Area | Status | Notes |
 | --- | --- | --- |
 | V1 spec | Done | Product decisions are captured in `docs/code-base-v1-spec.md`. |
 | Rust crate | Done | Cargo binary crate exists with package `codebase` and binary targets `cb` and `cb-tui`. |
+| Code structure | Done | `src/main.rs` and `src/bin/cb-tui.rs` are thin entrypoints; shared logic lives in `src/lib.rs`, `src/commands.rs`, `src/storage.rs`, `src/tui.rs`, and `src/tests.rs`. |
 | Dependency lockfile | Done | `Cargo.lock` is committed for reproducible app builds. |
 | Config model | Done | TOML config defaults and `config get/set` are implemented. |
 | SQLite registry | Done | Embedded schema creates `projects`, `tags`, and `project_tags`. |
