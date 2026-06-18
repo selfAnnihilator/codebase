@@ -1,10 +1,24 @@
 use super::*;
 use crate::storage::TreeConfig;
 use crate::tui::{
-    EditorInvocation, generate_tree_lines, load_docs_preview, next_sort_mode, shell_quote_path,
-    tui_project_matches,
+    EditorInvocation, TuiApp, format_project_row, generate_tree_lines, handle_tui_key,
+    load_docs_preview, match_segments, next_sort_mode, shell_quote_path, tui_project_matches,
 };
 use tempfile::TempDir;
+
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+fn key_with_modifiers(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+    KeyEvent::new(code, modifiers)
+}
+
+fn config_path() -> (TempDir, PathBuf) {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("config.toml");
+    (dir, path)
+}
 
 fn registry() -> Registry {
     Registry::open_memory().expect("registry")
@@ -310,6 +324,414 @@ fn tui_filter_matches_name_path_and_tags() {
     assert!(tui_project_matches(&project, "backend"));
     assert!(tui_project_matches(&project, "project"));
     assert!(!tui_project_matches(&project, "frontend"));
+}
+
+#[test]
+fn tui_filter_matches_only_from_word_or_path_component_start() {
+    let project = Project {
+        id: 1,
+        public_id: "cb_test".to_string(),
+        name: "With README".to_string(),
+        path: PathBuf::from("/tmp/project-no-readme"),
+        git_root: None,
+        doc_path: DEFAULT_DOC_PATH.to_string(),
+        editor: None,
+        editor_command: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+        last_opened_at: None,
+        tags: vec!["demo-tag".to_string()],
+        missing: false,
+    };
+
+    assert!(tui_project_matches(&project, "with"));
+    assert!(tui_project_matches(&project, "project"));
+    assert!(tui_project_matches(&project, "demo"));
+    assert!(!tui_project_matches(&project, "n"));
+    assert!(!tui_project_matches(&project, "tag"));
+}
+
+#[test]
+fn slash_activates_tui_search_mode() {
+    let registry = registry();
+    let config = Config::default();
+    let mut app = TuiApp::new(&registry, &config).unwrap();
+    let (_dir, path) = config_path();
+
+    let quit = handle_tui_key(
+        key(KeyCode::Char('/')),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &path,
+    )
+    .unwrap();
+
+    assert!(!quit);
+    assert!(app.search_active);
+    assert_eq!(app.search, "");
+}
+
+#[test]
+fn typing_filters_only_while_tui_search_is_active() {
+    let registry = registry();
+    let (_dir1, path1) = temp_project();
+    insert_named(&registry, "API Server", path1, &["backend"]);
+    let (_dir2, path2) = temp_project();
+    insert_named(&registry, "Mobile App", path2, &["frontend"]);
+    let config = Config::default();
+    let mut app = TuiApp::new(&registry, &config).unwrap();
+    let (_config_dir, path) = config_path();
+
+    handle_tui_key(
+        key(KeyCode::Char('a')),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &path,
+    )
+    .unwrap();
+    assert_eq!(app.search, "");
+    assert_eq!(app.filtered.len(), 2);
+
+    handle_tui_key(
+        key(KeyCode::Char('/')),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &path,
+    )
+    .unwrap();
+    for ch in "backend".chars() {
+        handle_tui_key(
+            key(KeyCode::Char(ch)),
+            &mut app,
+            &registry,
+            &mut config.clone(),
+            &path,
+        )
+        .unwrap();
+    }
+
+    assert_eq!(app.search, "backend");
+    assert_eq!(app.filtered.len(), 1);
+    assert_eq!(app.selected_project().unwrap().name, "API Server");
+}
+
+#[test]
+fn esc_in_tui_search_clears_query_and_restores_projects() {
+    let registry = registry();
+    let (_dir1, path1) = temp_project();
+    insert_named(&registry, "API Server", path1, &["backend"]);
+    let (_dir2, path2) = temp_project();
+    insert_named(&registry, "Mobile App", path2, &["frontend"]);
+    let config = Config::default();
+    let mut app = TuiApp::new(&registry, &config).unwrap();
+    let (_config_dir, path) = config_path();
+
+    handle_tui_key(
+        key(KeyCode::Char('/')),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &path,
+    )
+    .unwrap();
+    for ch in "backend".chars() {
+        handle_tui_key(
+            key(KeyCode::Char(ch)),
+            &mut app,
+            &registry,
+            &mut config.clone(),
+            &path,
+        )
+        .unwrap();
+    }
+    let quit = handle_tui_key(
+        key(KeyCode::Esc),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &path,
+    )
+    .unwrap();
+
+    assert!(!quit);
+    assert!(!app.search_active);
+    assert_eq!(app.search, "");
+    assert_eq!(app.filtered.len(), 2);
+}
+
+#[test]
+fn esc_outside_tui_search_does_not_quit_but_q_does() {
+    let registry = registry();
+    let config = Config::default();
+    let mut app = TuiApp::new(&registry, &config).unwrap();
+    let (_config_dir, path) = config_path();
+
+    let esc_quit = handle_tui_key(
+        key(KeyCode::Esc),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &path,
+    )
+    .unwrap();
+    let q_quit = handle_tui_key(
+        key(KeyCode::Char('q')),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &path,
+    )
+    .unwrap();
+
+    assert!(!esc_quit);
+    assert!(q_quit);
+}
+
+#[test]
+fn delete_key_removes_tui_project_registry_entry_after_confirmation() {
+    let registry = registry();
+    let (_dir, path) = temp_project();
+    let project = insert_named(&registry, "Remove Me", path.clone(), &[]);
+    let config = Config::default();
+    let mut app = TuiApp::new(&registry, &config).unwrap();
+    let (_config_dir, config_path) = config_path();
+
+    handle_tui_key(
+        key(KeyCode::Delete),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &config_path,
+    )
+    .unwrap();
+    handle_tui_key(
+        key(KeyCode::Char('y')),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &config_path,
+    )
+    .unwrap();
+
+    assert!(path.exists());
+    assert!(registry.project_by_id(project.id).unwrap().is_none());
+    assert!(app.prompt.is_none());
+}
+
+#[test]
+fn shift_delete_permanently_deletes_after_exact_name_confirmation() {
+    let registry = registry();
+    let (_dir, path) = temp_project();
+    let project = insert_named(&registry, "Delete Me", path.clone(), &[]);
+    let config = Config::default();
+    let mut app = TuiApp::new(&registry, &config).unwrap();
+    let (_config_dir, config_path) = config_path();
+
+    handle_tui_key(
+        key_with_modifiers(KeyCode::Delete, KeyModifiers::SHIFT),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &config_path,
+    )
+    .unwrap();
+    handle_tui_key(
+        key(KeyCode::Char('y')),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &config_path,
+    )
+    .unwrap();
+    for ch in "Delete Me".chars() {
+        handle_tui_key(
+            key(KeyCode::Char(ch)),
+            &mut app,
+            &registry,
+            &mut config.clone(),
+            &config_path,
+        )
+        .unwrap();
+    }
+    handle_tui_key(
+        key(KeyCode::Enter),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &config_path,
+    )
+    .unwrap();
+
+    assert!(!path.exists());
+    assert!(registry.project_by_id(project.id).unwrap().is_none());
+    assert!(app.prompt.is_none());
+}
+
+#[test]
+fn permanent_delete_name_confirmation_is_case_sensitive() {
+    let registry = registry();
+    let (_dir, path) = temp_project();
+    let project = insert_named(&registry, "Case Name", path.clone(), &[]);
+    let config = Config::default();
+    let mut app = TuiApp::new(&registry, &config).unwrap();
+    let (_config_dir, config_path) = config_path();
+
+    handle_tui_key(
+        key_with_modifiers(KeyCode::Delete, KeyModifiers::SHIFT),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &config_path,
+    )
+    .unwrap();
+    handle_tui_key(
+        key(KeyCode::Char('y')),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &config_path,
+    )
+    .unwrap();
+    for ch in "case name".chars() {
+        handle_tui_key(
+            key(KeyCode::Char(ch)),
+            &mut app,
+            &registry,
+            &mut config.clone(),
+            &config_path,
+        )
+        .unwrap();
+    }
+    handle_tui_key(
+        key(KeyCode::Enter),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &config_path,
+    )
+    .unwrap();
+
+    assert!(path.exists());
+    assert!(registry.project_by_id(project.id).unwrap().is_some());
+    assert!(app.prompt.is_none());
+    assert!(
+        app.status_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("did not match")
+    );
+}
+
+#[test]
+fn tui_search_selection_moves_within_filtered_results() {
+    let registry = registry();
+    let (_dir1, path1) = temp_project();
+    insert_named(&registry, "API Server", path1, &["backend"]);
+    let (_dir2, path2) = temp_project();
+    insert_named(&registry, "API Client", path2, &["frontend"]);
+    let (_dir3, path3) = temp_project();
+    insert_named(&registry, "Mobile App", path3, &["ios"]);
+    let config = Config::default();
+    let mut app = TuiApp::new(&registry, &config).unwrap();
+    let (_config_dir, path) = config_path();
+
+    handle_tui_key(
+        key(KeyCode::Char('/')),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &path,
+    )
+    .unwrap();
+    handle_tui_key(
+        key(KeyCode::Char('a')),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &path,
+    )
+    .unwrap();
+    handle_tui_key(
+        key(KeyCode::Char('p')),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &path,
+    )
+    .unwrap();
+    handle_tui_key(
+        key(KeyCode::Char('i')),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &path,
+    )
+    .unwrap();
+    handle_tui_key(
+        key(KeyCode::Down),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &path,
+    )
+    .unwrap();
+
+    assert_eq!(app.filtered.len(), 2);
+    assert_eq!(app.selected, 1);
+    assert!(app.selected_project().unwrap().name.starts_with("API"));
+}
+
+#[test]
+fn tui_project_row_shows_name_tags_and_path() {
+    let registry = registry();
+    let (_dir, path) = temp_project();
+    let project = registry
+        .insert_project(NewProject {
+            name: "API Server".to_string(),
+            path: path.clone(),
+            git_root: Some(path.clone()),
+            doc_path: DEFAULT_DOC_PATH.to_string(),
+            tags: vec!["backend".to_string()],
+        })
+        .unwrap();
+
+    let row = format_project_row(&project);
+
+    assert_eq!(
+        row,
+        format!("API Server\ntag: backend\npath: {}", display_path(&path))
+    );
+}
+
+#[test]
+fn tui_match_segments_highlight_query_case_insensitively() {
+    assert_eq!(
+        match_segments("No README", "read"),
+        vec![
+            ("No ".to_string(), false),
+            ("READ".to_string(), true),
+            ("ME".to_string(), false),
+        ]
+    );
+}
+
+#[test]
+fn tui_match_segments_does_not_treat_connected_punctuation_as_word_start() {
+    assert_eq!(
+        match_segments("path: /tmp/project-no_readme.demo", "n"),
+        vec![("path: /tmp/project-no_readme.demo".to_string(), false)]
+    );
+    assert_eq!(
+        match_segments("path: /tmp/project-no_readme.demo", "project"),
+        vec![
+            ("path: /tmp/".to_string(), false),
+            ("project".to_string(), true),
+            ("-no_readme.demo".to_string(), false),
+        ]
+    );
 }
 
 #[test]

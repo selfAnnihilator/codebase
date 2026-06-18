@@ -364,44 +364,65 @@ fn run_tui(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TuiFocus {
+pub(super) enum TuiFocus {
     Left,
     Preview,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PreviewTab {
+pub(super) enum PreviewTab {
     Docs,
     Tree,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum TuiPrompt {
+    RemoveEntry {
+        project_id: i64,
+        project_name: String,
+    },
+    PermanentDeleteConfirm {
+        project_id: i64,
+        project_name: String,
+    },
+    PermanentDeleteName {
+        project_id: i64,
+        project_name: String,
+        typed: String,
+    },
+}
+
 #[derive(Debug)]
-struct TuiApp {
-    projects: Vec<Project>,
-    filtered: Vec<usize>,
-    search: String,
-    selected: usize,
-    focus: TuiFocus,
-    tab: PreviewTab,
-    docs_scroll: u16,
-    tree_scroll: u16,
-    status_message: Option<String>,
+pub(super) struct TuiApp {
+    pub(super) projects: Vec<Project>,
+    pub(super) filtered: Vec<usize>,
+    pub(super) search: String,
+    pub(super) search_active: bool,
+    pub(super) selected: usize,
+    pub(super) focus: TuiFocus,
+    pub(super) tab: PreviewTab,
+    pub(super) docs_scroll: u16,
+    pub(super) tree_scroll: u16,
+    pub(super) status_message: Option<String>,
+    pub(super) prompt: Option<TuiPrompt>,
     docs_tab_rect: Rect,
     tree_tab_rect: Rect,
 }
 
 impl TuiApp {
-    fn new(registry: &Registry, config: &Config) -> Result<Self> {
+    pub(super) fn new(registry: &Registry, config: &Config) -> Result<Self> {
         let mut app = Self {
             projects: Vec::new(),
             filtered: Vec::new(),
             search: String::new(),
+            search_active: false,
             selected: 0,
             focus: TuiFocus::Left,
             tab: PreviewTab::Docs,
             docs_scroll: 0,
             tree_scroll: 0,
             status_message: None,
+            prompt: None,
             docs_tab_rect: Rect::default(),
             tree_tab_rect: Rect::default(),
         };
@@ -440,7 +461,7 @@ impl TuiApp {
         }
     }
 
-    fn selected_project(&self) -> Option<&Project> {
+    pub(super) fn selected_project(&self) -> Option<&Project> {
         self.filtered
             .get(self.selected)
             .and_then(|index| self.projects.get(*index))
@@ -450,21 +471,41 @@ impl TuiApp {
         self.docs_scroll = 0;
         self.tree_scroll = 0;
     }
+
+    fn selected_project_by_id(&self, project_id: i64) -> Option<Project> {
+        self.projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .cloned()
+    }
 }
 
 pub(super) fn tui_project_matches(project: &Project, query: &str) -> bool {
-    project.name.to_lowercase().contains(query)
-        || path_to_string(&project.path).to_lowercase().contains(query)
-        || project.tags.iter().any(|tag| tag.contains(query))
+    field_matches_query(&project.name, query)
+        || field_matches_query(&path_to_string(&project.path), query)
+        || project
+            .tags
+            .iter()
+            .any(|tag| field_matches_query(tag, query))
 }
 
-fn handle_tui_key(
+fn field_matches_query(text: &str, query: &str) -> bool {
+    match_segments(text, query)
+        .into_iter()
+        .any(|(_, is_match)| is_match)
+}
+
+pub(super) fn handle_tui_key(
     key: KeyEvent,
     app: &mut TuiApp,
     registry: &Registry,
     config: &mut Config,
     config_path: &Path,
 ) -> Result<bool> {
+    if handle_tui_prompt_key(key, app, registry, config)? {
+        return Ok(false);
+    }
+
     if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('r') {
         config.tui.sort_mode = next_sort_mode(config.tui.sort_mode);
         config.save(config_path)?;
@@ -483,25 +524,53 @@ fn handle_tui_key(
         return Ok(false);
     }
 
-    match key.code {
-        KeyCode::Char('q') => return Ok(true),
-        KeyCode::Esc => {
-            if !app.search.is_empty() {
+    if app.search_active {
+        match key.code {
+            KeyCode::Char('q') => return Ok(true),
+            KeyCode::Esc => {
                 app.search.clear();
                 app.apply_filter();
-            } else if app.focus == TuiFocus::Preview {
-                app.focus = TuiFocus::Left;
-            } else {
-                return Ok(true);
+                app.search_active = false;
+                app.reset_preview_scroll();
+                return Ok(false);
             }
+            KeyCode::Backspace => {
+                app.search.pop();
+                app.apply_filter();
+                app.reset_preview_scroll();
+                return Ok(false);
+            }
+            KeyCode::Char('1') => {
+                app.tab = PreviewTab::Docs;
+                return Ok(false);
+            }
+            KeyCode::Char('2') => {
+                app.tab = PreviewTab::Tree;
+                return Ok(false);
+            }
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.search.push(ch);
+                app.apply_filter();
+                app.reset_preview_scroll();
+                return Ok(false);
+            }
+            _ => {}
         }
+    }
+
+    match key.code {
+        KeyCode::Char('q') => return Ok(true),
+        KeyCode::Esc => {}
         KeyCode::Tab => {
             app.focus = match app.focus {
                 TuiFocus::Left => TuiFocus::Preview,
                 TuiFocus::Preview => TuiFocus::Left,
             };
         }
-        KeyCode::Char('/') => app.focus = TuiFocus::Left,
+        KeyCode::Char('/') => {
+            app.search_active = true;
+            app.focus = TuiFocus::Left;
+        }
         KeyCode::Char('1') => app.tab = PreviewTab::Docs,
         KeyCode::Char('2') => app.tab = PreviewTab::Tree,
         KeyCode::Enter => open_selected_from_tui(app, registry, config)?,
@@ -511,6 +580,12 @@ fn handle_tui_key(
                 cmd_edit(registry, EditArgs::from_project_selector(project.public_id))?;
                 app.reload(registry, config)?;
             }
+        }
+        KeyCode::Delete if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            start_permanent_delete_prompt(app);
+        }
+        KeyCode::Delete => {
+            start_remove_entry_prompt(app);
         }
         KeyCode::Up => {
             if app.focus == TuiFocus::Left {
@@ -532,23 +607,147 @@ fn handle_tui_key(
         }
         KeyCode::PageUp => decrement_preview_scroll_by(app, 10),
         KeyCode::PageDown => increment_preview_scroll(app, 10),
-        KeyCode::Backspace => {
-            if app.focus == TuiFocus::Left {
-                app.search.pop();
-                app.apply_filter();
-                app.reset_preview_scroll();
-            }
-        }
-        KeyCode::Char(ch)
-            if app.focus == TuiFocus::Left && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
-            app.search.push(ch);
-            app.apply_filter();
-            app.reset_preview_scroll();
-        }
         _ => {}
     }
     Ok(false)
+}
+
+fn handle_tui_prompt_key(
+    key: KeyEvent,
+    app: &mut TuiApp,
+    registry: &Registry,
+    config: &Config,
+) -> Result<bool> {
+    let Some(prompt) = app.prompt.clone() else {
+        return Ok(false);
+    };
+
+    match prompt {
+        TuiPrompt::RemoveEntry {
+            project_id,
+            project_name,
+        } => match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                registry.remove_project(project_id)?;
+                app.prompt = None;
+                app.status_message = Some(format!("Removed {project_name}"));
+                app.reload(registry, config)?;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                app.prompt = None;
+                app.status_message = Some("Remove cancelled".to_string());
+            }
+            _ => {}
+        },
+        TuiPrompt::PermanentDeleteConfirm {
+            project_id,
+            project_name,
+        } => match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                app.prompt = Some(TuiPrompt::PermanentDeleteName {
+                    project_id,
+                    project_name: project_name.clone(),
+                    typed: String::new(),
+                });
+                app.status_message = Some(format!(
+                    "Type project name exactly to permanently delete: {project_name}"
+                ));
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                app.prompt = None;
+                app.status_message = Some("Permanent delete cancelled".to_string());
+            }
+            _ => {}
+        },
+        TuiPrompt::PermanentDeleteName {
+            project_id,
+            project_name,
+            mut typed,
+        } => match key.code {
+            KeyCode::Esc => {
+                app.prompt = None;
+                app.status_message = Some("Permanent delete cancelled".to_string());
+            }
+            KeyCode::Backspace => {
+                typed.pop();
+                app.prompt = Some(TuiPrompt::PermanentDeleteName {
+                    project_id,
+                    project_name,
+                    typed,
+                });
+            }
+            KeyCode::Enter => {
+                if typed == project_name {
+                    permanent_delete_project(app, registry, config, project_id)?;
+                } else {
+                    app.prompt = None;
+                    app.status_message =
+                        Some("Project name did not match exactly; cancelled".to_string());
+                }
+            }
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                typed.push(ch);
+                app.prompt = Some(TuiPrompt::PermanentDeleteName {
+                    project_id,
+                    project_name,
+                    typed,
+                });
+            }
+            _ => {}
+        },
+    }
+
+    Ok(true)
+}
+
+fn start_remove_entry_prompt(app: &mut TuiApp) {
+    let Some(project) = app.selected_project().cloned() else {
+        return;
+    };
+    app.prompt = Some(TuiPrompt::RemoveEntry {
+        project_id: project.id,
+        project_name: project.name.clone(),
+    });
+    app.status_message = Some(format!("Remove '{}' from registry only? y/n", project.name));
+}
+
+fn start_permanent_delete_prompt(app: &mut TuiApp) {
+    let Some(project) = app.selected_project().cloned() else {
+        return;
+    };
+    app.prompt = Some(TuiPrompt::PermanentDeleteConfirm {
+        project_id: project.id,
+        project_name: project.name.clone(),
+    });
+    app.status_message = Some(format!(
+        "Permanently delete '{}' and remove registry entry? y/n",
+        project.name
+    ));
+}
+
+fn permanent_delete_project(
+    app: &mut TuiApp,
+    registry: &Registry,
+    config: &Config,
+    project_id: i64,
+) -> Result<()> {
+    let Some(project) = app.selected_project_by_id(project_id) else {
+        app.prompt = None;
+        app.status_message = Some("Project no longer exists".to_string());
+        app.reload(registry, config)?;
+        return Ok(());
+    };
+
+    if !project.missing {
+        validate_delete_target(&project.path)?;
+        fs::remove_dir_all(&project.path)
+            .with_context(|| format!("failed to permanently delete {}", project.path.display()))?;
+    }
+    registry.remove_project(project.id)?;
+    app.prompt = None;
+    app.status_message = Some(format!("Permanently deleted {}", project.name));
+    app.reload(registry, config)?;
+    Ok(())
 }
 
 impl EditArgs {
@@ -662,7 +861,8 @@ fn render_tui(frame: &mut Frame<'_>, app: &mut TuiApp, config: &Config) {
         .split(outer[0]);
     render_project_pane(frame, app, panes[0]);
     render_preview_pane(frame, app, config, panes[1]);
-    render_status_bar(frame, app, config, outer[1]);
+    render_status_bar(frame, app, outer[1]);
+    render_prompt_popup(frame, app);
 }
 
 fn render_project_pane(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
@@ -670,7 +870,7 @@ fn render_project_pane(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(1)])
         .split(area);
-    let search_style = if app.focus == TuiFocus::Left {
+    let search_style = if app.search_active {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default()
@@ -686,29 +886,7 @@ fn render_project_pane(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
         .filtered
         .iter()
         .filter_map(|index| app.projects.get(*index))
-        .map(|project| {
-            let status = if project.missing { "missing" } else { "ok" };
-            let git = if project.git_root.is_some() {
-                " git"
-            } else {
-                ""
-            };
-            let tags = if project.tags.is_empty() {
-                String::new()
-            } else {
-                format!(" [{}]", project.tags.join(","))
-            };
-            ListItem::new(vec![
-                Line::from(vec![
-                    Span::styled(&project.name, Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(format!("{tags}{git}")),
-                ]),
-                Line::from(Span::styled(
-                    format!("{}  {status}", display_path(&project.path)),
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ])
-        })
+        .map(|project| render_project_list_item(project, &app.search))
         .collect::<Vec<_>>();
     let mut state = ListState::default();
     if !app.filtered.is_empty() {
@@ -723,6 +901,100 @@ fn render_project_pane(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
         chunks[1],
         &mut state,
     );
+}
+
+pub(super) fn format_project_row(project: &Project) -> String {
+    let tags = if project.tags.is_empty() {
+        String::new()
+    } else {
+        project.tags.join(", ")
+    };
+    let missing = if project.missing { " [missing]" } else { "" };
+    format!(
+        "{}\ntag: {}\npath: {}{}",
+        project.name,
+        tags,
+        display_path(&project.path),
+        missing
+    )
+}
+
+fn render_project_list_item(project: &Project, query: &str) -> ListItem<'static> {
+    let row = format_project_row(project);
+    let mut lines = row.lines().map(ToOwned::to_owned);
+    let name = lines.next().unwrap_or_default();
+    let name_style = Style::default().add_modifier(Modifier::BOLD);
+    let mut item_lines = vec![Line::from(highlighted_spans(&name, query, name_style))];
+    item_lines
+        .extend(lines.map(|line| Line::from(highlighted_spans(&line, query, Style::default()))));
+    ListItem::new(item_lines)
+}
+
+fn highlighted_spans(text: &str, query: &str, base_style: Style) -> Vec<Span<'static>> {
+    match_segments(text, query)
+        .into_iter()
+        .map(|(segment, is_match)| {
+            let style = if is_match {
+                base_style.fg(Color::Yellow)
+            } else {
+                base_style
+            };
+            Span::styled(segment, style)
+        })
+        .collect()
+}
+
+pub(super) fn match_segments(text: &str, query: &str) -> Vec<(String, bool)> {
+    let query_chars = query
+        .chars()
+        .map(|ch| ch.to_lowercase().collect::<String>())
+        .collect::<Vec<_>>();
+    if query_chars.is_empty() {
+        return vec![(text.to_string(), false)];
+    }
+
+    let chars = text.char_indices().collect::<Vec<_>>();
+    let mut segments = Vec::new();
+    let mut index = 0;
+    let mut last_byte = 0;
+
+    while index + query_chars.len() <= chars.len() {
+        let matches = is_match_start(&chars, index)
+            && query_chars.iter().enumerate().all(|(offset, query_ch)| {
+                chars[index + offset].1.to_lowercase().collect::<String>() == *query_ch
+            });
+        if matches {
+            let start = chars[index].0;
+            let end = chars
+                .get(index + query_chars.len())
+                .map(|(byte, _)| *byte)
+                .unwrap_or(text.len());
+            if last_byte < start {
+                segments.push((text[last_byte..start].to_string(), false));
+            }
+            segments.push((text[start..end].to_string(), true));
+            index += query_chars.len();
+            last_byte = end;
+        } else {
+            index += 1;
+        }
+    }
+
+    if last_byte < text.len() {
+        segments.push((text[last_byte..].to_string(), false));
+    }
+    if segments.is_empty() {
+        segments.push((text.to_string(), false));
+    }
+    segments
+}
+
+fn is_match_start(chars: &[(usize, char)], index: usize) -> bool {
+    index == 0 || chars[index - 1].1.is_whitespace() || is_path_separator(chars[index - 1].1)
+}
+
+fn is_path_separator(ch: char) -> bool {
+    ch == '/' || ch == '\\'
 }
 
 fn render_preview_pane(frame: &mut Frame<'_>, app: &mut TuiApp, config: &Config, area: Rect) {
@@ -789,20 +1061,81 @@ fn render_preview_pane(frame: &mut Frame<'_>, app: &mut TuiApp, config: &Config,
     );
 }
 
-fn render_status_bar(frame: &mut Frame<'_>, app: &TuiApp, config: &Config, area: Rect) {
-    let message = app.status_message.as_deref().unwrap_or("");
-    let status = format!(
-        " Sort: {:?} {:?} | {} projects | Focus: {:?} | Ctrl+r sort | Ctrl+o order | Enter open | d docs | q quit {}",
-        config.tui.sort_mode,
-        config.tui.sort_order,
-        app.filtered.len(),
-        app.focus,
-        message
-    );
+fn render_status_bar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    let search = if app.search_active {
+        "Search: active"
+    } else {
+        "Search: inactive"
+    };
+    let status = format!(" {search} | / search | q quit");
     frame.render_widget(
         Paragraph::new(status).style(Style::default().fg(Color::Black).bg(Color::White)),
         area,
     );
+}
+
+fn render_prompt_popup(frame: &mut Frame<'_>, app: &TuiApp) {
+    let Some(prompt) = app.prompt.as_ref() else {
+        return;
+    };
+
+    let (title, lines) = match prompt {
+        TuiPrompt::RemoveEntry { project_name, .. } => (
+            "Remove Project",
+            vec![
+                Line::from(format!("Remove '{project_name}' from registry?")),
+                Line::from("Project files will remain."),
+                Line::from(""),
+                Line::from("y confirm    n/Esc cancel"),
+            ],
+        ),
+        TuiPrompt::PermanentDeleteConfirm { project_name, .. } => (
+            "Permanent Delete",
+            vec![
+                Line::from(format!("Delete '{project_name}' permanently?")),
+                Line::from("This deletes the project directory."),
+                Line::from(""),
+                Line::from("y continue    n/Esc cancel"),
+            ],
+        ),
+        TuiPrompt::PermanentDeleteName {
+            project_name,
+            typed,
+            ..
+        } => (
+            "Confirm Name",
+            vec![
+                Line::from("Type the project name exactly:"),
+                Line::from(Span::styled(
+                    project_name.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(format!("> {typed}")),
+                Line::from("Enter confirm    Esc cancel"),
+            ],
+        ),
+    };
+
+    let area = centered_popup_rect(frame.area(), 62, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().title(title).borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn centered_popup_rect(area: Rect, preferred_width: u16, preferred_height: u16) -> Rect {
+    let width = preferred_width.min(area.width.saturating_sub(4)).max(20);
+    let height = preferred_height.min(area.height.saturating_sub(2)).max(3);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
 }
 
 pub(super) fn load_docs_preview(project: &Project) -> Vec<String> {
