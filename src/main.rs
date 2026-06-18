@@ -4,15 +4,33 @@ use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use comfy_table::{Cell, Table, presets::UTF8_FULL};
+use crossterm::{
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, KeyCode, KeyEvent,
+        KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    },
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
 use directories::ProjectDirs;
+use ignore::WalkBuilder;
 use inquire::{Confirm, Select, Text};
-use pulldown_cmark::{Event, Parser as MarkdownParser, Tag, TagEnd};
+use pulldown_cmark::{Event as MarkdownEvent, Parser as MarkdownParser, Tag, TagEnd};
 use rand::RngCore;
+use ratatui::{
+    Frame, Terminal,
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout, Position, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +45,24 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    if invoked_as_cb_tui() {
+        if cb_tui_help_requested() {
+            println!(
+                "Usage: cb-tui\n\nOptions:\n  -h, --help     Print help\n  -V, --version  Print version"
+            );
+            return Ok(());
+        }
+        if cb_tui_version_requested() {
+            println!("{}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        let paths = AppPaths::new()?;
+        fs::create_dir_all(&paths.data_dir)?;
+        let config = Config::load_or_default(&paths.config_file)?;
+        let registry = Registry::open(&paths.db_file)?;
+        return cmd_tui(&registry, config, paths.config_file);
+    }
+
     let cli = Cli::parse();
     let paths = AppPaths::new()?;
     fs::create_dir_all(&paths.data_dir)?;
@@ -43,8 +79,33 @@ fn run() -> Result<()> {
         Command::Remove(args) => cmd_remove(&registry, args),
         Command::Delete(args) => cmd_delete(&registry, args),
         Command::Doc(args) => cmd_doc(&registry, &config, args),
+        Command::Tui => cmd_tui(&registry, config, paths.config_file),
         Command::Config(args) => cmd_config(paths.config_file, config, args),
     }
+}
+
+fn invoked_as_cb_tui() -> bool {
+    env::args_os()
+        .next()
+        .and_then(|arg| PathBuf::from(arg).file_name().map(|name| name.to_owned()))
+        .and_then(|name| name.to_str().map(ToOwned::to_owned))
+        .is_some_and(|name| is_cb_tui_binary_name(&name))
+}
+
+fn is_cb_tui_binary_name(name: &str) -> bool {
+    name == "cb-tui" || name == "cb-tui.exe"
+}
+
+fn cb_tui_help_requested() -> bool {
+    env::args()
+        .skip(1)
+        .any(|arg| arg == "-h" || arg == "--help")
+}
+
+fn cb_tui_version_requested() -> bool {
+    env::args()
+        .skip(1)
+        .any(|arg| arg == "-V" || arg == "--version")
 }
 
 #[derive(Debug, Parser)]
@@ -70,6 +131,7 @@ enum Command {
     Remove(RemoveArgs),
     Delete(DeleteArgs),
     Doc(DocArgs),
+    Tui,
     Config(ConfigArgs),
 }
 
@@ -332,7 +394,7 @@ impl Config {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct Project {
     id: i64,
     public_id: String,
@@ -1338,7 +1400,7 @@ fn render_markdown_to_terminal_text(markdown: &str) -> String {
 
     for event in MarkdownParser::new(markdown) {
         match event {
-            Event::Start(Tag::Heading { level, .. }) => {
+            MarkdownEvent::Start(Tag::Heading { level, .. }) => {
                 trim_trailing_spaces(&mut output);
                 if !output.ends_with('\n') && !output.is_empty() {
                     output.push('\n');
@@ -1347,39 +1409,39 @@ fn render_markdown_to_terminal_text(markdown: &str) -> String {
                 output.push(' ');
                 in_heading = true;
             }
-            Event::End(TagEnd::Heading(_)) => {
+            MarkdownEvent::End(TagEnd::Heading(_)) => {
                 in_heading = false;
                 output.push_str("\n\n");
             }
-            Event::Start(Tag::Paragraph) => {}
-            Event::End(TagEnd::Paragraph) => output.push_str("\n\n"),
-            Event::Start(Tag::List(_)) => {
+            MarkdownEvent::Start(Tag::Paragraph) => {}
+            MarkdownEvent::End(TagEnd::Paragraph) => output.push_str("\n\n"),
+            MarkdownEvent::Start(Tag::List(_)) => {
                 list_depth += 1;
             }
-            Event::End(TagEnd::List(_)) => {
+            MarkdownEvent::End(TagEnd::List(_)) => {
                 list_depth = list_depth.saturating_sub(1);
                 output.push('\n');
             }
-            Event::Start(Tag::Item) => {
+            MarkdownEvent::Start(Tag::Item) => {
                 output.push_str(&"  ".repeat(list_depth.saturating_sub(1)));
                 output.push_str("- ");
             }
-            Event::End(TagEnd::Item) => output.push('\n'),
-            Event::Start(Tag::BlockQuote(_)) => output.push_str("> "),
-            Event::End(TagEnd::BlockQuote(_)) => output.push('\n'),
-            Event::Start(Tag::CodeBlock(_)) => {
+            MarkdownEvent::End(TagEnd::Item) => output.push('\n'),
+            MarkdownEvent::Start(Tag::BlockQuote(_)) => output.push_str("> "),
+            MarkdownEvent::End(TagEnd::BlockQuote(_)) => output.push('\n'),
+            MarkdownEvent::Start(Tag::CodeBlock(_)) => {
                 in_code_block = true;
                 output.push_str("```\n");
             }
-            Event::End(TagEnd::CodeBlock) => {
+            MarkdownEvent::End(TagEnd::CodeBlock) => {
                 in_code_block = false;
                 if !output.ends_with('\n') {
                     output.push('\n');
                 }
                 output.push_str("```\n\n");
             }
-            Event::Text(text) => output.push_str(&text),
-            Event::Code(code) => {
+            MarkdownEvent::Text(text) => output.push_str(&text),
+            MarkdownEvent::Code(code) => {
                 if in_code_block {
                     output.push_str(&code);
                 } else {
@@ -1388,16 +1450,16 @@ fn render_markdown_to_terminal_text(markdown: &str) -> String {
                     output.push('`');
                 }
             }
-            Event::SoftBreak => output.push(if in_heading { ' ' } else { '\n' }),
-            Event::HardBreak => output.push('\n'),
-            Event::Rule => output.push_str("\n---\n"),
-            Event::Html(html) => output.push_str(&html),
-            Event::FootnoteReference(reference) => {
+            MarkdownEvent::SoftBreak => output.push(if in_heading { ' ' } else { '\n' }),
+            MarkdownEvent::HardBreak => output.push('\n'),
+            MarkdownEvent::Rule => output.push_str("\n---\n"),
+            MarkdownEvent::Html(html) => output.push_str(&html),
+            MarkdownEvent::FootnoteReference(reference) => {
                 output.push_str("[^");
                 output.push_str(&reference);
                 output.push(']');
             }
-            Event::TaskListMarker(checked) => {
+            MarkdownEvent::TaskListMarker(checked) => {
                 output.push_str(if checked { "[x] " } else { "[ ] " });
             }
             _ => {}
@@ -1451,6 +1513,610 @@ fn validate_delete_target(path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn cmd_tui(registry: &Registry, config: Config, config_path: PathBuf) -> Result<()> {
+    if !is_interactive() {
+        bail!("tui requires an interactive terminal");
+    }
+
+    enable_raw_mode().context("failed to enable raw mode")?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .context("failed to enter alternate screen")?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    let result = run_tui(registry, config, config_path, &mut terminal);
+    disable_raw_mode().ok();
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )
+    .ok();
+    terminal.show_cursor().ok();
+    result
+}
+
+fn run_tui(
+    registry: &Registry,
+    mut config: Config,
+    config_path: PathBuf,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
+    let mut app = TuiApp::new(registry, &config)?;
+    loop {
+        terminal.draw(|frame| render_tui(frame, &mut app, &config))?;
+        if event::poll(Duration::from_millis(250))? {
+            match event::read()? {
+                CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                    if handle_tui_key(key, &mut app, registry, &mut config, &config_path)? {
+                        break;
+                    }
+                }
+                CrosstermEvent::Mouse(mouse) => {
+                    handle_tui_mouse(mouse, &mut app)?;
+                }
+                CrosstermEvent::Resize(_, _) => {}
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TuiFocus {
+    Left,
+    Preview,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreviewTab {
+    Docs,
+    Tree,
+}
+
+#[derive(Debug)]
+struct TuiApp {
+    projects: Vec<Project>,
+    filtered: Vec<usize>,
+    search: String,
+    selected: usize,
+    focus: TuiFocus,
+    tab: PreviewTab,
+    docs_scroll: u16,
+    tree_scroll: u16,
+    status_message: Option<String>,
+    docs_tab_rect: Rect,
+    tree_tab_rect: Rect,
+}
+
+impl TuiApp {
+    fn new(registry: &Registry, config: &Config) -> Result<Self> {
+        let mut app = Self {
+            projects: Vec::new(),
+            filtered: Vec::new(),
+            search: String::new(),
+            selected: 0,
+            focus: TuiFocus::Left,
+            tab: PreviewTab::Docs,
+            docs_scroll: 0,
+            tree_scroll: 0,
+            status_message: None,
+            docs_tab_rect: Rect::default(),
+            tree_tab_rect: Rect::default(),
+        };
+        app.reload(registry, config)?;
+        Ok(app)
+    }
+
+    fn reload(&mut self, registry: &Registry, config: &Config) -> Result<()> {
+        self.projects = registry.all_projects(ListArgs {
+            json: false,
+            tag: None,
+            missing: false,
+            sort: config.tui.sort_mode,
+            order: config.tui.sort_order,
+        })?;
+        self.apply_filter();
+        Ok(())
+    }
+
+    fn apply_filter(&mut self) {
+        let query = self.search.to_lowercase();
+        self.filtered = self
+            .projects
+            .iter()
+            .enumerate()
+            .filter_map(|(index, project)| {
+                if query.is_empty() || tui_project_matches(project, &query) {
+                    Some(index)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if self.selected >= self.filtered.len() {
+            self.selected = self.filtered.len().saturating_sub(1);
+        }
+    }
+
+    fn selected_project(&self) -> Option<&Project> {
+        self.filtered
+            .get(self.selected)
+            .and_then(|index| self.projects.get(*index))
+    }
+
+    fn reset_preview_scroll(&mut self) {
+        self.docs_scroll = 0;
+        self.tree_scroll = 0;
+    }
+}
+
+fn tui_project_matches(project: &Project, query: &str) -> bool {
+    project.name.to_lowercase().contains(query)
+        || path_to_string(&project.path).to_lowercase().contains(query)
+        || project.tags.iter().any(|tag| tag.contains(query))
+}
+
+fn handle_tui_key(
+    key: KeyEvent,
+    app: &mut TuiApp,
+    registry: &Registry,
+    config: &mut Config,
+    config_path: &Path,
+) -> Result<bool> {
+    if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('r') {
+        config.tui.sort_mode = next_sort_mode(config.tui.sort_mode);
+        config.save(config_path)?;
+        app.reload(registry, config)?;
+        app.status_message = Some(format!("Sort: {:?}", config.tui.sort_mode).to_lowercase());
+        return Ok(false);
+    }
+    if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('o') {
+        config.tui.sort_order = match config.tui.sort_order {
+            SortOrder::Asc => SortOrder::Desc,
+            SortOrder::Desc => SortOrder::Asc,
+        };
+        config.save(config_path)?;
+        app.reload(registry, config)?;
+        app.status_message = Some(format!("Order: {:?}", config.tui.sort_order).to_lowercase());
+        return Ok(false);
+    }
+
+    match key.code {
+        KeyCode::Char('q') => return Ok(true),
+        KeyCode::Esc => {
+            if !app.search.is_empty() {
+                app.search.clear();
+                app.apply_filter();
+            } else if app.focus == TuiFocus::Preview {
+                app.focus = TuiFocus::Left;
+            } else {
+                return Ok(true);
+            }
+        }
+        KeyCode::Tab => {
+            app.focus = match app.focus {
+                TuiFocus::Left => TuiFocus::Preview,
+                TuiFocus::Preview => TuiFocus::Left,
+            };
+        }
+        KeyCode::Char('/') => app.focus = TuiFocus::Left,
+        KeyCode::Char('1') => app.tab = PreviewTab::Docs,
+        KeyCode::Char('2') => app.tab = PreviewTab::Tree,
+        KeyCode::Enter => open_selected_from_tui(app, registry, config)?,
+        KeyCode::Char('d') => edit_selected_doc_from_tui(app, config)?,
+        KeyCode::Char('e') => {
+            if let Some(project) = app.selected_project().cloned() {
+                cmd_edit(registry, EditArgs::from_project_selector(project.public_id))?;
+                app.reload(registry, config)?;
+            }
+        }
+        KeyCode::Up => {
+            if app.focus == TuiFocus::Left {
+                app.selected = app.selected.saturating_sub(1);
+                app.reset_preview_scroll();
+            } else {
+                decrement_preview_scroll(app);
+            }
+        }
+        KeyCode::Down => {
+            if app.focus == TuiFocus::Left {
+                if app.selected + 1 < app.filtered.len() {
+                    app.selected += 1;
+                    app.reset_preview_scroll();
+                }
+            } else {
+                increment_preview_scroll(app, 1);
+            }
+        }
+        KeyCode::PageUp => decrement_preview_scroll_by(app, 10),
+        KeyCode::PageDown => increment_preview_scroll(app, 10),
+        KeyCode::Backspace => {
+            if app.focus == TuiFocus::Left {
+                app.search.pop();
+                app.apply_filter();
+                app.reset_preview_scroll();
+            }
+        }
+        KeyCode::Char(ch)
+            if app.focus == TuiFocus::Left && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            app.search.push(ch);
+            app.apply_filter();
+            app.reset_preview_scroll();
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+impl EditArgs {
+    fn from_project_selector(selector: String) -> Self {
+        Self {
+            selector,
+            name: None,
+            doc_path: None,
+            editor: None,
+            editor_command: None,
+            path: None,
+            tags: Vec::new(),
+            add_tags: Vec::new(),
+            remove_tags: Vec::new(),
+        }
+    }
+}
+
+fn open_selected_from_tui(app: &mut TuiApp, registry: &Registry, config: &Config) -> Result<()> {
+    let Some(project) = app.selected_project().cloned() else {
+        return Ok(());
+    };
+    match ensure_project_available(&project)
+        .and_then(|_| resolve_editor_invocation(config, &project, None, &project.path))
+        .and_then(|invocation| {
+            let mut child = spawn_editor_process(&invocation)?;
+            registry.touch_last_opened(project.id)?;
+            wait_for_editor(&mut child)
+        }) {
+        Ok(()) => app.status_message = Some(format!("Opened {}", project.name)),
+        Err(error) => app.status_message = Some(error.to_string()),
+    }
+    Ok(())
+}
+
+fn edit_selected_doc_from_tui(app: &mut TuiApp, config: &Config) -> Result<()> {
+    let Some(project) = app.selected_project().cloned() else {
+        return Ok(());
+    };
+    let result = ensure_project_available(&project).and_then(|_| {
+        let doc_path = resolved_doc_path(&project)?;
+        ensure_doc_exists_for_edit(&doc_path, true, true)?;
+        let invocation = resolve_editor_invocation(config, &project, None, &doc_path)?;
+        let mut child = spawn_editor_process(&invocation)?;
+        wait_for_editor(&mut child)
+    });
+    match result {
+        Ok(()) => {
+            app.docs_scroll = 0;
+            app.status_message = Some(format!("Edited docs for {}", project.name));
+        }
+        Err(error) => app.status_message = Some(error.to_string()),
+    }
+    Ok(())
+}
+
+fn handle_tui_mouse(mouse: MouseEvent, app: &mut TuiApp) -> Result<()> {
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let position = Position::new(mouse.column, mouse.row);
+            if app.docs_tab_rect.contains(position) {
+                app.tab = PreviewTab::Docs;
+                app.focus = TuiFocus::Preview;
+            } else if app.tree_tab_rect.contains(position) {
+                app.tab = PreviewTab::Tree;
+                app.focus = TuiFocus::Preview;
+            }
+        }
+        MouseEventKind::ScrollDown => increment_preview_scroll(app, 3),
+        MouseEventKind::ScrollUp => decrement_preview_scroll_by(app, 3),
+        _ => {}
+    }
+    Ok(())
+}
+
+fn increment_preview_scroll(app: &mut TuiApp, amount: u16) {
+    match app.tab {
+        PreviewTab::Docs => app.docs_scroll = app.docs_scroll.saturating_add(amount),
+        PreviewTab::Tree => app.tree_scroll = app.tree_scroll.saturating_add(amount),
+    }
+}
+
+fn decrement_preview_scroll(app: &mut TuiApp) {
+    decrement_preview_scroll_by(app, 1);
+}
+
+fn decrement_preview_scroll_by(app: &mut TuiApp, amount: u16) {
+    match app.tab {
+        PreviewTab::Docs => app.docs_scroll = app.docs_scroll.saturating_sub(amount),
+        PreviewTab::Tree => app.tree_scroll = app.tree_scroll.saturating_sub(amount),
+    }
+}
+
+fn next_sort_mode(mode: SortMode) -> SortMode {
+    match mode {
+        SortMode::Recent => SortMode::Name,
+        SortMode::Name => SortMode::Path,
+        SortMode::Path => SortMode::Created,
+        SortMode::Created => SortMode::Recent,
+    }
+}
+
+fn render_tui(frame: &mut Frame<'_>, app: &mut TuiApp, config: &Config) {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(frame.area());
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(outer[0]);
+    render_project_pane(frame, app, panes[0]);
+    render_preview_pane(frame, app, config, panes[1]);
+    render_status_bar(frame, app, config, outer[1]);
+}
+
+fn render_project_pane(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(area);
+    let search_style = if app.focus == TuiFocus::Left {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default()
+    };
+    frame.render_widget(
+        Paragraph::new(app.search.as_str())
+            .block(Block::default().title("Search").borders(Borders::ALL))
+            .style(search_style),
+        chunks[0],
+    );
+
+    let items = app
+        .filtered
+        .iter()
+        .filter_map(|index| app.projects.get(*index))
+        .map(|project| {
+            let status = if project.missing { "missing" } else { "ok" };
+            let git = if project.git_root.is_some() {
+                " git"
+            } else {
+                ""
+            };
+            let tags = if project.tags.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", project.tags.join(","))
+            };
+            ListItem::new(vec![
+                Line::from(vec![
+                    Span::styled(&project.name, Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(format!("{tags}{git}")),
+                ]),
+                Line::from(Span::styled(
+                    format!("{}  {status}", display_path(&project.path)),
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default();
+    if !app.filtered.is_empty() {
+        state.select(Some(app.selected));
+    }
+    let block_title = format!("Projects ({}/{})", app.filtered.len(), app.projects.len());
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(Block::default().title(block_title).borders(Borders::ALL))
+            .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+            .highlight_symbol("> "),
+        chunks[1],
+        &mut state,
+    );
+}
+
+fn render_preview_pane(frame: &mut Frame<'_>, app: &mut TuiApp, config: &Config, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(area);
+    let tab_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Min(1),
+        ])
+        .split(chunks[0]);
+    app.docs_tab_rect = tab_chunks[0];
+    app.tree_tab_rect = tab_chunks[1];
+    let selected = match app.tab {
+        PreviewTab::Docs => 0,
+        PreviewTab::Tree => 1,
+    };
+    frame.render_widget(
+        Tabs::new(["Docs", "Tree"])
+            .select(selected)
+            .block(Block::default().title("Preview").borders(Borders::ALL))
+            .style(Style::default())
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        chunks[0],
+    );
+
+    let (title, lines, scroll) = match app.tab {
+        PreviewTab::Docs => (
+            "Docs",
+            app.selected_project()
+                .map(load_docs_preview)
+                .unwrap_or_else(|| vec!["No project selected".to_string()]),
+            app.docs_scroll,
+        ),
+        PreviewTab::Tree => (
+            "Tree",
+            app.selected_project()
+                .map(|project| load_tree_preview(project, &config.tree))
+                .unwrap_or_else(|| vec!["No project selected".to_string()]),
+            app.tree_scroll,
+        ),
+    };
+    let text = lines.join("\n");
+    let focus_style = if app.focus == TuiFocus::Preview {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default()
+    };
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(Block::default().title(title).borders(Borders::ALL))
+            .scroll((scroll, 0))
+            .wrap(Wrap { trim: false })
+            .style(focus_style),
+        chunks[1],
+    );
+}
+
+fn render_status_bar(frame: &mut Frame<'_>, app: &TuiApp, config: &Config, area: Rect) {
+    let message = app.status_message.as_deref().unwrap_or("");
+    let status = format!(
+        " Sort: {:?} {:?} | {} projects | Focus: {:?} | Ctrl+r sort | Ctrl+o order | Enter open | d docs | q quit {}",
+        config.tui.sort_mode,
+        config.tui.sort_order,
+        app.filtered.len(),
+        app.focus,
+        message
+    );
+    frame.render_widget(
+        Paragraph::new(status).style(Style::default().fg(Color::Black).bg(Color::White)),
+        area,
+    );
+}
+
+fn load_docs_preview(project: &Project) -> Vec<String> {
+    if project.missing {
+        return vec![
+            "Project path is missing.".to_string(),
+            format!("Path: {}", project.path.display()),
+            "Use edit/relocate from CLI or remove the entry.".to_string(),
+        ];
+    }
+    let doc_path = match resolved_doc_path(project) {
+        Ok(path) => path,
+        Err(error) => return vec![error.to_string()],
+    };
+    if !doc_path.exists() {
+        return vec![
+            "Documentation file is missing.".to_string(),
+            format!("Expected: {}", doc_path.display()),
+            "Press d to create/open it.".to_string(),
+        ];
+    }
+    match fs::read_to_string(&doc_path) {
+        Ok(content) if is_markdown_path(&doc_path) => render_markdown_to_terminal_text(&content)
+            .lines()
+            .map(ToOwned::to_owned)
+            .collect(),
+        Ok(content) => content.lines().map(ToOwned::to_owned).collect(),
+        Err(error) => vec![format!("Failed to read docs: {error}")],
+    }
+}
+
+fn load_tree_preview(project: &Project, config: &TreeConfig) -> Vec<String> {
+    if project.missing {
+        return vec![
+            "Project path is missing.".to_string(),
+            format!("Path: {}", project.path.display()),
+        ];
+    }
+    match generate_tree_lines(&project.path, config) {
+        Ok(lines) => lines,
+        Err(error) => vec![format!("Failed to load tree: {error}")],
+    }
+}
+
+fn generate_tree_lines(root: &Path, config: &TreeConfig) -> Result<Vec<String>> {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .max_depth(Some(config.max_depth.saturating_add(1)))
+        .hidden(false)
+        .git_ignore(config.respect_gitignore)
+        .git_global(config.respect_gitignore)
+        .git_exclude(config.respect_gitignore)
+        .sort_by_file_path(|left, right| left.cmp(right));
+    let mut lines = Vec::new();
+    let mut entries_seen = 0_usize;
+    lines.push(format!(
+        "{}/",
+        root.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(".")
+    ));
+    for entry in builder.build().skip(1) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                lines.push(format!("! {error}"));
+                continue;
+            }
+        };
+        let path = entry.path();
+        if should_skip_tree_path(path, root, config) {
+            continue;
+        }
+        entries_seen += 1;
+        if entries_seen > config.max_entries {
+            lines.push("... tree truncated".to_string());
+            break;
+        }
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        let depth = relative.components().count().saturating_sub(1);
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("?");
+        let suffix = if path.is_dir() { "/" } else { "" };
+        lines.push(format!("{}{}{}", "  ".repeat(depth), name, suffix));
+    }
+    if lines.len() == 1 {
+        lines.push("(empty)".to_string());
+    }
+    Ok(lines)
+}
+
+fn should_skip_tree_path(path: &Path, root: &Path, config: &TreeConfig) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if matches!(
+        name,
+        ".git" | "node_modules" | "target" | "dist" | "build" | ".venv" | "__pycache__"
+    ) {
+        return true;
+    }
+    if !config.show_hidden && name.starts_with('.') && name != ".env.example" {
+        return true;
+    }
+    relative.components().count() > config.max_depth
 }
 
 fn cmd_config(path: PathBuf, mut config: Config, args: ConfigArgs) -> Result<()> {
@@ -2016,5 +2682,98 @@ mod tests {
 
         assert!(doc.exists());
         assert_eq!(fs::read_to_string(doc).unwrap(), "");
+    }
+
+    #[test]
+    fn tree_generation_skips_heavy_and_hidden_paths() {
+        let (_dir, path) = temp_project();
+        fs::write(path.join("main.rs"), "").unwrap();
+        fs::create_dir(path.join(".git")).unwrap();
+        fs::write(path.join(".secret"), "").unwrap();
+        fs::write(path.join(".env.example"), "").unwrap();
+        fs::create_dir(path.join("node_modules")).unwrap();
+        fs::write(path.join("node_modules/pkg.js"), "").unwrap();
+
+        let lines = generate_tree_lines(&path, &TreeConfig::default()).unwrap();
+        let joined = lines.join("\n");
+
+        assert!(joined.contains("main.rs"));
+        assert!(joined.contains(".env.example"));
+        assert!(!joined.contains(".secret"));
+        assert!(!joined.contains(".git"));
+        assert!(!joined.contains("node_modules"));
+    }
+
+    #[test]
+    fn tree_generation_respects_depth_and_entry_limits() {
+        let (_dir, path) = temp_project();
+        fs::create_dir(path.join("a")).unwrap();
+        fs::create_dir(path.join("a/b")).unwrap();
+        fs::write(path.join("a/b/deep.txt"), "").unwrap();
+        fs::write(path.join("one.txt"), "").unwrap();
+        fs::write(path.join("two.txt"), "").unwrap();
+
+        let config = TreeConfig {
+            max_depth: 1,
+            max_entries: 2,
+            ..TreeConfig::default()
+        };
+        let lines = generate_tree_lines(&path, &config).unwrap();
+        let joined = lines.join("\n");
+
+        assert!(joined.contains("a/"));
+        assert!(!joined.contains("deep.txt"));
+        assert!(joined.contains("truncated"));
+    }
+
+    #[test]
+    fn tui_filter_matches_name_path_and_tags() {
+        let registry = registry();
+        let (_dir, path) = temp_project();
+        let project = insert_named(&registry, "API Server", path, &["backend"]);
+
+        assert!(tui_project_matches(&project, "api"));
+        assert!(tui_project_matches(&project, "backend"));
+        assert!(tui_project_matches(&project, "project"));
+        assert!(!tui_project_matches(&project, "frontend"));
+    }
+
+    #[test]
+    fn sort_mode_cycles_in_expected_order() {
+        assert_eq!(next_sort_mode(SortMode::Recent), SortMode::Name);
+        assert_eq!(next_sort_mode(SortMode::Name), SortMode::Path);
+        assert_eq!(next_sort_mode(SortMode::Path), SortMode::Created);
+        assert_eq!(next_sort_mode(SortMode::Created), SortMode::Recent);
+    }
+
+    #[test]
+    fn detects_cb_tui_binary_names() {
+        assert!(is_cb_tui_binary_name("cb-tui"));
+        assert!(is_cb_tui_binary_name("cb-tui.exe"));
+        assert!(!is_cb_tui_binary_name("cb"));
+    }
+
+    #[test]
+    fn docs_preview_reports_missing_doc() {
+        let registry = registry();
+        let (_dir, path) = temp_project();
+        let project = insert_named(&registry, "API", path, &[]);
+
+        let lines = load_docs_preview(&project);
+
+        assert!(lines.join("\n").contains("Documentation file is missing"));
+    }
+
+    #[test]
+    fn docs_preview_reports_missing_project() {
+        let registry = registry();
+        let (dir, path) = temp_project();
+        let project = insert_named(&registry, "API", path, &[]);
+        drop(dir);
+        let project = registry.project_by_id(project.id).unwrap().unwrap();
+
+        let lines = load_docs_preview(&project);
+
+        assert!(lines.join("\n").contains("Project path is missing"));
     }
 }

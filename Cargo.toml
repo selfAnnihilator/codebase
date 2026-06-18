@@ -7,18 +7,27 @@ edition = "2024"
 name = "cb"
 path = "src/main.rs"
 
+[[bin]]
+name = "cb-tui"
+path = "src/bin/cb-tui.rs"
+test = false
+
 [dependencies]
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 comfy-table = "7.1"
+crossterm = "0.29"
 directories = "6.0"
+ignore = "0.4"
 inquire = "0.9"
 pulldown-cmark = "0.13"
 rand = "0.9"
+ratatui = "0.29"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+textwrap = "0.16"
 toml = "0.9"
 trash = "5.2"
 
