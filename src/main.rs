@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command as ProcessCommand};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
@@ -10,6 +11,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use comfy_table::{Cell, Table, presets::UTF8_FULL};
 use directories::ProjectDirs;
 use inquire::{Confirm, Select, Text};
+use pulldown_cmark::{Event, Parser as MarkdownParser, Tag, TagEnd};
 use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -35,9 +37,12 @@ fn run() -> Result<()> {
         Command::Init(args) => cmd_init(&registry, args),
         Command::List(args) => cmd_list(&registry, args),
         Command::Search(args) => cmd_search(&registry, args),
+        Command::Open(args) => cmd_open(&registry, &config, args),
         Command::Show(args) => cmd_show(&registry, args),
         Command::Edit(args) => cmd_edit(&registry, args),
         Command::Remove(args) => cmd_remove(&registry, args),
+        Command::Delete(args) => cmd_delete(&registry, args),
+        Command::Doc(args) => cmd_doc(&registry, &config, args),
         Command::Config(args) => cmd_config(paths.config_file, config, args),
     }
 }
@@ -59,9 +64,12 @@ enum Command {
     Init(InitArgs),
     List(ListArgs),
     Search(SearchArgs),
+    Open(OpenArgs),
     Show(ShowArgs),
     Edit(EditArgs),
     Remove(RemoveArgs),
+    Delete(DeleteArgs),
+    Doc(DocArgs),
     Config(ConfigArgs),
 }
 
@@ -110,6 +118,14 @@ struct SearchArgs {
 }
 
 #[derive(Debug, Args)]
+struct OpenArgs {
+    selector: String,
+
+    #[arg(long = "with")]
+    editor_override: Option<String>,
+}
+
+#[derive(Debug, Args)]
 struct ShowArgs {
     selector: String,
 
@@ -149,6 +165,40 @@ struct EditArgs {
 #[derive(Debug, Args)]
 struct RemoveArgs {
     selector: String,
+
+    #[arg(long)]
+    yes: bool,
+}
+
+#[derive(Debug, Args)]
+struct DeleteArgs {
+    selector: String,
+
+    #[arg(long)]
+    yes: bool,
+
+    #[arg(long)]
+    permanent: bool,
+
+    #[arg(long)]
+    confirm_name: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct DocArgs {
+    selector: String,
+
+    #[arg(long)]
+    raw: bool,
+
+    #[arg(long)]
+    path: bool,
+
+    #[arg(long)]
+    edit: bool,
+
+    #[arg(long)]
+    create: bool,
 
     #[arg(long)]
     yes: bool,
@@ -581,6 +631,14 @@ impl Registry {
         Ok(())
     }
 
+    fn touch_last_opened(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE projects SET last_opened_at = ?1, updated_at = ?1 WHERE id = ?2",
+            params![now_string(), id],
+        )?;
+        Ok(())
+    }
+
     fn set_tags(&self, project_id: i64, tags: &[String]) -> Result<()> {
         self.conn.execute(
             "DELETE FROM project_tags WHERE project_id = ?1",
@@ -807,6 +865,17 @@ fn cmd_search(registry: &Registry, args: SearchArgs) -> Result<()> {
     print_projects(projects, args.json)
 }
 
+fn cmd_open(registry: &Registry, config: &Config, args: OpenArgs) -> Result<()> {
+    let project = registry.resolve_selector(&args.selector, is_interactive())?;
+    ensure_project_available(&project)?;
+    let invocation =
+        resolve_editor_invocation(config, &project, args.editor_override, &project.path)?;
+    let mut child = spawn_editor_process(&invocation)?;
+    registry.touch_last_opened(project.id)?;
+    wait_for_editor(&mut child)?;
+    Ok(())
+}
+
 fn cmd_show(registry: &Registry, args: ShowArgs) -> Result<()> {
     let project = registry.resolve_selector(&args.selector, is_interactive())?;
     if args.json {
@@ -969,6 +1038,418 @@ fn cmd_remove(registry: &Registry, args: RemoveArgs) -> Result<()> {
     }
     registry.remove_project(project.id)?;
     println!("Removed {} ({})", project.name, project.public_id);
+    Ok(())
+}
+
+fn cmd_delete(registry: &Registry, args: DeleteArgs) -> Result<()> {
+    let project = registry.resolve_selector(&args.selector, is_interactive() && !args.yes)?;
+
+    if project.missing {
+        if !args.yes {
+            if !is_interactive() {
+                bail!(
+                    "delete for missing projects requires --yes when terminal is not interactive"
+                );
+            }
+            let confirmed = Confirm::new(&format!(
+                "Project path is missing: {}. Remove registry entry only?",
+                project.path.display()
+            ))
+            .with_default(false)
+            .prompt()
+            .context("missing-path delete confirmation cancelled")?;
+            if !confirmed {
+                println!("Cancelled");
+                return Ok(());
+            }
+        }
+        registry.remove_project(project.id)?;
+        println!(
+            "Removed missing project entry {} ({})",
+            project.name, project.public_id
+        );
+        return Ok(());
+    }
+
+    validate_delete_target(&project.path)?;
+    if args.permanent {
+        let Some(confirm_name) = args.confirm_name.as_deref() else {
+            bail!("permanent delete requires --confirm-name <project name>");
+        };
+        if confirm_name != project.name {
+            bail!(
+                "--confirm-name must exactly match project name '{}'",
+                project.name
+            );
+        }
+        fs::remove_dir_all(&project.path)
+            .with_context(|| format!("failed to permanently delete {}", project.path.display()))?;
+    } else {
+        if !args.yes {
+            if !is_interactive() {
+                bail!("delete requires --yes when terminal is not interactive");
+            }
+            let typed_name = Text::new(&format!(
+                "Type project name to move '{}' to trash:",
+                display_path(&project.path)
+            ))
+            .prompt()
+            .context("delete confirmation cancelled")?;
+            if typed_name != project.name {
+                bail!("typed project name did not match; cancelled");
+            }
+        }
+        trash::delete(&project.path)
+            .with_context(|| format!("failed to move {} to trash", project.path.display()))?;
+    }
+
+    registry.remove_project(project.id)?;
+    println!("Deleted {} ({})", project.name, project.public_id);
+    Ok(())
+}
+
+fn cmd_doc(registry: &Registry, config: &Config, args: DocArgs) -> Result<()> {
+    if [args.raw, args.path, args.edit, args.create]
+        .into_iter()
+        .filter(|flag| *flag)
+        .count()
+        > 1
+    {
+        bail!("choose only one of --raw, --path, --edit, or --create");
+    }
+
+    let project = registry.resolve_selector(&args.selector, is_interactive())?;
+    ensure_project_available(&project)?;
+    let doc_path = resolved_doc_path(&project)?;
+
+    if args.path {
+        println!("{}", doc_path.display());
+        return Ok(());
+    }
+
+    if args.edit || args.create {
+        ensure_doc_exists_for_edit(&doc_path, args.create, args.yes)?;
+        let invocation = resolve_editor_invocation(config, &project, None, &doc_path)?;
+        let mut child = spawn_editor_process(&invocation)?;
+        wait_for_editor(&mut child)?;
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&doc_path)
+        .with_context(|| format!("failed to read doc {}", doc_path.display()))?;
+    if args.raw || !is_markdown_path(&doc_path) {
+        print!("{content}");
+    } else {
+        print!("{}", render_markdown_to_terminal_text(&content));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum EditorInvocation {
+    Direct { program: String, target: PathBuf },
+    Shell { command: String },
+}
+
+fn resolve_editor_invocation(
+    config: &Config,
+    project: &Project,
+    override_value: Option<String>,
+    target: &Path,
+) -> Result<EditorInvocation> {
+    if let Some(value) = override_value {
+        return editor_value_to_invocation(&value, target);
+    }
+    if let Some(command) = project
+        .editor_command
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(EditorInvocation::Shell {
+            command: render_command_template(command, target),
+        });
+    }
+    if !config.editor_command.is_empty() {
+        return Ok(EditorInvocation::Shell {
+            command: render_command_template(&config.editor_command, target),
+        });
+    }
+    if let Some(editor) = project.editor.as_deref().filter(|value| !value.is_empty()) {
+        validate_editor_name(editor)?;
+        return Ok(EditorInvocation::Direct {
+            program: editor.to_string(),
+            target: target.to_path_buf(),
+        });
+    }
+    validate_editor_name(&config.editor)?;
+    Ok(EditorInvocation::Direct {
+        program: config.editor.clone(),
+        target: target.to_path_buf(),
+    })
+}
+
+fn editor_value_to_invocation(value: &str, target: &Path) -> Result<EditorInvocation> {
+    if value.contains("{path}") || value.contains(char::is_whitespace) {
+        Ok(EditorInvocation::Shell {
+            command: render_command_template(value, target),
+        })
+    } else {
+        validate_editor_name(value)?;
+        Ok(EditorInvocation::Direct {
+            program: value.to_string(),
+            target: target.to_path_buf(),
+        })
+    }
+}
+
+fn render_command_template(template: &str, target: &Path) -> String {
+    template.replace("{path}", &shell_quote_path(target))
+}
+
+fn shell_quote_path(path: &Path) -> String {
+    let raw = path_to_string(path);
+    #[cfg(windows)]
+    {
+        format!("\"{}\"", raw.replace('"', "\\\""))
+    }
+    #[cfg(not(windows))]
+    {
+        format!("'{}'", raw.replace('\'', "'\"'\"'"))
+    }
+}
+
+fn spawn_editor_process(invocation: &EditorInvocation) -> Result<Child> {
+    match invocation {
+        EditorInvocation::Direct { program, target } => ProcessCommand::new(program)
+            .arg(target)
+            .spawn()
+            .with_context(|| format!("failed to spawn editor '{program}'")),
+        EditorInvocation::Shell { command } => {
+            #[cfg(windows)]
+            let mut process = {
+                let mut process = ProcessCommand::new("cmd");
+                process.arg("/C").arg(command);
+                process
+            };
+            #[cfg(not(windows))]
+            let mut process = {
+                let mut process = ProcessCommand::new("sh");
+                process.arg("-c").arg(command);
+                process
+            };
+            process
+                .spawn()
+                .with_context(|| format!("failed to spawn editor command '{command}'"))
+        }
+    }
+}
+
+fn wait_for_editor(child: &mut Child) -> Result<()> {
+    let status = child.wait().context("failed to wait for editor")?;
+    if !status.success() {
+        bail!("editor exited with status {status}");
+    }
+    Ok(())
+}
+
+fn ensure_project_available(project: &Project) -> Result<()> {
+    if project.missing {
+        bail!(
+            "project path is missing: {}\nUse `cb edit {} --path <new-path>` to relocate it, or `cb remove {} --yes` to remove the registry entry.",
+            project.path.display(),
+            project.public_id,
+            project.public_id
+        );
+    }
+    Ok(())
+}
+
+fn resolved_doc_path(project: &Project) -> Result<PathBuf> {
+    let doc_path = Path::new(&project.doc_path);
+    if doc_path.is_absolute() {
+        bail!("stored doc path must be relative: {}", project.doc_path);
+    }
+    if !is_text_doc_path(doc_path) {
+        bail!("doc path must be markdown or plain text");
+    }
+    Ok(project.path.join(doc_path))
+}
+
+fn ensure_doc_exists_for_edit(doc_path: &Path, create_requested: bool, yes: bool) -> Result<()> {
+    if doc_path.exists() {
+        if create_requested {
+            println!("Doc already exists: {}", doc_path.display());
+            println!("Opening existing file.");
+        }
+        return Ok(());
+    }
+
+    if !create_requested {
+        if !is_interactive() {
+            bail!(
+                "doc does not exist: {}. Use --create to create it.",
+                doc_path.display()
+            );
+        }
+        let confirmed = Confirm::new(&format!(
+            "Doc does not exist: {}. Create it?",
+            doc_path.display()
+        ))
+        .with_default(false)
+        .prompt()
+        .context("doc creation confirmation cancelled")?;
+        if !confirmed {
+            bail!("doc creation cancelled");
+        }
+    } else if !yes && !is_interactive() {
+        bail!("creating docs in non-interactive mode requires --yes");
+    } else if !yes {
+        let confirmed = Confirm::new(&format!(
+            "Create parent directories and doc file {}?",
+            doc_path.display()
+        ))
+        .with_default(false)
+        .prompt()
+        .context("doc creation confirmation cancelled")?;
+        if !confirmed {
+            bail!("doc creation cancelled");
+        }
+    }
+
+    if let Some(parent) = doc_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(doc_path, "")?;
+    Ok(())
+}
+
+fn is_markdown_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("md" | "markdown")
+    )
+}
+
+fn render_markdown_to_terminal_text(markdown: &str) -> String {
+    let mut output = String::new();
+    let mut in_heading = false;
+    let mut in_code_block = false;
+    let mut list_depth = 0_usize;
+
+    for event in MarkdownParser::new(markdown) {
+        match event {
+            Event::Start(Tag::Heading { level, .. }) => {
+                trim_trailing_spaces(&mut output);
+                if !output.ends_with('\n') && !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(&"#".repeat(heading_level_number(level)));
+                output.push(' ');
+                in_heading = true;
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                in_heading = false;
+                output.push_str("\n\n");
+            }
+            Event::Start(Tag::Paragraph) => {}
+            Event::End(TagEnd::Paragraph) => output.push_str("\n\n"),
+            Event::Start(Tag::List(_)) => {
+                list_depth += 1;
+            }
+            Event::End(TagEnd::List(_)) => {
+                list_depth = list_depth.saturating_sub(1);
+                output.push('\n');
+            }
+            Event::Start(Tag::Item) => {
+                output.push_str(&"  ".repeat(list_depth.saturating_sub(1)));
+                output.push_str("- ");
+            }
+            Event::End(TagEnd::Item) => output.push('\n'),
+            Event::Start(Tag::BlockQuote(_)) => output.push_str("> "),
+            Event::End(TagEnd::BlockQuote(_)) => output.push('\n'),
+            Event::Start(Tag::CodeBlock(_)) => {
+                in_code_block = true;
+                output.push_str("```\n");
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                in_code_block = false;
+                if !output.ends_with('\n') {
+                    output.push('\n');
+                }
+                output.push_str("```\n\n");
+            }
+            Event::Text(text) => output.push_str(&text),
+            Event::Code(code) => {
+                if in_code_block {
+                    output.push_str(&code);
+                } else {
+                    output.push('`');
+                    output.push_str(&code);
+                    output.push('`');
+                }
+            }
+            Event::SoftBreak => output.push(if in_heading { ' ' } else { '\n' }),
+            Event::HardBreak => output.push('\n'),
+            Event::Rule => output.push_str("\n---\n"),
+            Event::Html(html) => output.push_str(&html),
+            Event::FootnoteReference(reference) => {
+                output.push_str("[^");
+                output.push_str(&reference);
+                output.push(']');
+            }
+            Event::TaskListMarker(checked) => {
+                output.push_str(if checked { "[x] " } else { "[ ] " });
+            }
+            _ => {}
+        }
+    }
+
+    trim_trailing_spaces(&mut output);
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output
+}
+
+fn heading_level_number(level: pulldown_cmark::HeadingLevel) -> usize {
+    match level {
+        pulldown_cmark::HeadingLevel::H1 => 1,
+        pulldown_cmark::HeadingLevel::H2 => 2,
+        pulldown_cmark::HeadingLevel::H3 => 3,
+        pulldown_cmark::HeadingLevel::H4 => 4,
+        pulldown_cmark::HeadingLevel::H5 => 5,
+        pulldown_cmark::HeadingLevel::H6 => 6,
+    }
+}
+
+fn trim_trailing_spaces(output: &mut String) {
+    while output.ends_with(' ') || output.ends_with('\t') {
+        output.pop();
+    }
+}
+
+fn validate_delete_target(path: &Path) -> Result<()> {
+    let canonical = canonicalize_existing(path)?;
+    let root = Path::new(std::path::MAIN_SEPARATOR_STR);
+    if canonical == root {
+        bail!("refusing to delete filesystem root");
+    }
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from)
+        && canonical == home
+    {
+        bail!("refusing to delete home directory");
+    }
+    if let Ok(current_dir) = env::current_dir().and_then(|path| path.canonicalize())
+        && canonical == current_dir
+    {
+        bail!("refusing to delete current working directory");
+    }
+    if canonical.components().count() <= 2 {
+        bail!(
+            "refusing to delete shallow system path: {}",
+            canonical.display()
+        );
+    }
     Ok(())
 }
 
@@ -1307,6 +1788,13 @@ mod tests {
             .expect("insert project")
     }
 
+    fn default_config_with_editor(editor: &str) -> Config {
+        Config {
+            editor: editor.to_string(),
+            ..Config::default()
+        }
+    }
+
     #[test]
     fn normalizes_and_validates_tags() {
         assert_eq!(normalize_tag("Work").unwrap(), "work");
@@ -1432,5 +1920,101 @@ mod tests {
     fn dedup_tags_sorts_and_deduplicates() {
         let tags = dedup_tags(&["Work".into(), "backend".into(), "work".into()]).unwrap();
         assert_eq!(tags, vec!["backend", "work"]);
+    }
+
+    #[test]
+    fn resolves_direct_editor_from_config() {
+        let registry = registry();
+        let (_dir, path) = temp_project();
+        let project = insert_named(&registry, "API", path.clone(), &[]);
+        let config = default_config_with_editor("true");
+
+        let invocation = resolve_editor_invocation(&config, &project, None, &path).unwrap();
+
+        assert_eq!(
+            invocation,
+            EditorInvocation::Direct {
+                program: "true".to_string(),
+                target: path
+            }
+        );
+    }
+
+    #[test]
+    fn resolves_override_template_as_shell_command() {
+        let registry = registry();
+        let (_dir, path) = temp_project();
+        let project = insert_named(&registry, "API", path.clone(), &[]);
+        let config = Config::default();
+
+        let invocation =
+            resolve_editor_invocation(&config, &project, Some("echo {path}".into()), &path)
+                .unwrap();
+
+        assert_eq!(
+            invocation,
+            EditorInvocation::Shell {
+                command: format!("echo {}", shell_quote_path(&path))
+            }
+        );
+    }
+
+    #[test]
+    fn shell_quotes_paths_with_spaces_and_single_quotes() {
+        let path = PathBuf::from("/tmp/a path/it's-here");
+        #[cfg(not(windows))]
+        assert_eq!(shell_quote_path(&path), "'/tmp/a path/it'\"'\"'s-here'");
+    }
+
+    #[test]
+    fn touch_last_opened_updates_project() {
+        let registry = registry();
+        let (_dir, path) = temp_project();
+        let project = insert_named(&registry, "API", path, &[]);
+
+        registry.touch_last_opened(project.id).unwrap();
+        let updated = registry.project_by_id(project.id).unwrap().unwrap();
+
+        assert!(updated.last_opened_at.is_some());
+    }
+
+    #[test]
+    fn resolves_relative_doc_path_under_project_root() {
+        let registry = registry();
+        let (_dir, path) = temp_project();
+        let project = insert_named(&registry, "API", path.clone(), &[]);
+
+        assert_eq!(
+            resolved_doc_path(&project).unwrap(),
+            path.join(DEFAULT_DOC_PATH)
+        );
+    }
+
+    #[test]
+    fn renders_basic_markdown_to_terminal_text() {
+        let rendered = render_markdown_to_terminal_text("# Title\n\n- one\n- two\n\n`code`\n");
+
+        assert!(rendered.contains("# Title"));
+        assert!(rendered.contains("- one"));
+        assert!(rendered.contains("`code`"));
+    }
+
+    #[test]
+    fn validates_dangerous_delete_targets() {
+        assert!(validate_delete_target(Path::new(std::path::MAIN_SEPARATOR_STR)).is_err());
+        if let Some(home) = env::var_os("HOME") {
+            assert!(validate_delete_target(&PathBuf::from(home)).is_err());
+        }
+    }
+
+    #[test]
+    fn creates_missing_doc_with_parents() {
+        let (_dir, path) = temp_project();
+        let doc = path.join("docs/overview.md");
+
+        ensure_doc_exists_for_edit(&doc, true, true).unwrap();
+
+        assert!(doc.exists());
+        assert_eq!(fs::read_to_string(doc).unwrap(), "");
     }
 }
