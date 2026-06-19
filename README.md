@@ -2,6 +2,8 @@
 
 Code Base is a local project registry and launcher. It stores metadata about existing project directories, lets you search by name/path/tags, previews docs and file trees in a terminal UI, and opens projects or docs in your configured editor.
 
+Repository: <https://github.com/selfAnnihilator/codebase>
+
 It installs two commands:
 
 - `cb`: main CLI.

@@ -5,6 +5,8 @@ edition = "2024"
 rust-version = "1.85"
 description = "Local project registry and launcher with CLI and TUI workflows"
 readme = "README.md"
+homepage = "https://github.com/selfAnnihilator/codebase"
+repository = "https://github.com/selfAnnihilator/codebase"
 license = "UNLICENSED"
 publish = false
 
