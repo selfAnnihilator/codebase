@@ -2,6 +2,11 @@
 name = "codebase"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Local project registry and launcher with CLI and TUI workflows"
+readme = "README.md"
+license = "UNLICENSED"
+publish = false
 
 [[bin]]
 name = "cb"

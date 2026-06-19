@@ -160,7 +160,60 @@ cargo clippy --all-targets -- -D warnings
 
 ## Install Locally
 
-Install both binaries from this checkout:
+The install scripts are distro-neutral POSIX shell scripts. They install from this checkout using Cargo, so they work on any Linux distro with Rust/Cargo installed.
+
+Install Rust and Cargo with rustup:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Or use your distro package manager:
+
+```bash
+# Debian/Ubuntu
+sudo apt install cargo
+
+# Fedora/RHEL
+sudo dnf install cargo
+
+# Arch
+sudo pacman -S rust
+
+# openSUSE
+sudo zypper install cargo
+
+# Alpine
+sudo apk add cargo rust
+
+# Void
+sudo xbps-install rust cargo
+```
+
+Install both binaries:
+
+```bash
+./scripts/install.sh
+```
+
+This installs the Cargo package from the current checkout and provides:
+
+```text
+cb
+cb-tui
+```
+
+If Cargo's bin directory is not on `PATH`, the script prints the exact `export PATH=...` line to add.
+
+Uninstall the binaries:
+
+```bash
+./scripts/uninstall.sh
+```
+
+Uninstall does not remove your registry data or config.
+
+Manual Cargo install is also supported:
 
 ```bash
 cargo install --path .

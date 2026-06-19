@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Check scripts
+        run: |
+          sh -n scripts/install.sh
+          sh -n scripts/uninstall.sh
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Install smoke
+        run: |
+          export CARGO_HOME="$RUNNER_TEMP/codebase-cargo-home"
+          ./scripts/install.sh
+          "$CARGO_HOME/bin/cb" --help >/dev/null
+          "$CARGO_HOME/bin/cb-tui" --help >/dev/null
+          ./scripts/uninstall.sh

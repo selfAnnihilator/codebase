@@ -2,13 +2,13 @@
 
 Baseline spec: [code-base-v1-spec.md](code-base-v1-spec.md)
 
-Last reviewed commit: working tree after `100b6fa Add launcher docs and delete CLI workflows`
+Last reviewed commit: working tree after local install scripts and release hardening docs
 
 ## Summary
 
-Code Base currently has the v1 CLI and TUI workflows implemented. The project can be built as Rust binaries named `cb` and `cb-tui`, store project metadata in SQLite, manage TOML config, register/search/edit projects, open projects in an editor, view/edit/create project docs, delete projects with guardrails, and browse projects in a two-pane TUI.
+Code Base currently has the v1 CLI and TUI workflows implemented. The project can be built as Rust binaries named `cb` and `cb-tui`, store project metadata in SQLite, manage TOML config, register/search/edit projects, open projects in an editor, view/edit/create project docs, delete projects with guardrails, browse projects in a two-pane TUI, and install/uninstall locally through distro-neutral shell scripts.
 
-The remaining gaps are polish-level: richer terminal Markdown rendering and deeper TUI visual/interaction refinement.
+The remaining gaps are release polish-level: decide whether to add signed/tagged binary release artifacts, richer terminal Markdown styling, and future TUI refinements as patches.
 
 The implementation is now organized as a library crate with small binary entrypoints and internal modules for storage/config, TUI/tree/editor/doc helpers, and tests.
 
@@ -20,6 +20,8 @@ The implementation is now organized as a library crate with small binary entrypo
 | Rust crate | Done | Cargo binary crate exists with package `codebase` and binary targets `cb` and `cb-tui`. |
 | Code structure | Done | `src/main.rs` and `src/bin/cb-tui.rs` are thin entrypoints; shared logic lives in `src/lib.rs`, `src/commands.rs`, `src/storage.rs`, `src/tui.rs`, and `src/tests.rs`. |
 | Dependency lockfile | Done | `Cargo.lock` is committed for reproducible app builds. |
+| Release docs | Done | README, install docs, and a release checklist are present. |
+| CI | Done | GitHub Actions runs script syntax checks, Rust checks, and an install smoke. |
 | Config model | Done | TOML config defaults and `config get/set` are implemented. |
 | SQLite registry | Done | Embedded schema creates `projects`, `tags`, and `project_tags`. |
 | Project IDs | Done | Stable random `cb_...` IDs are generated with collision checks. |
@@ -38,6 +40,7 @@ The implementation is now organized as a library crate with small binary entrypo
 | TUI | Done | Two-pane Ratatui launcher with search, tabs, sort controls, status bar, keyboard, and mouse support exists. |
 | Docs rendering | Partial | CLI and TUI use basic terminal-native Markdown rendering; richer styling remains future polish. |
 | File tree preview | Done | Live tree generation respects config limits, ignore rules, hidden filtering, and truncation markers. |
+| Install scripts | Done | `scripts/install.sh` and `scripts/uninstall.sh` install/remove `cb` and `cb-tui` through Cargo. |
 
 ## Implemented Commands
 
@@ -78,9 +81,9 @@ All v1 commands are implemented.
 
 Polish and harden the v1 experience:
 
-1. Manually exercise the TUI across real terminal sizes and project shapes.
-2. Improve Markdown styling in the TUI if the current plain terminal rendering feels too sparse.
-3. Split the large `src/main.rs` into modules once behavior stabilizes.
+1. Tag the first release after one final install/uninstall smoke on the target machine.
+2. Add binary release artifacts if distributing beyond source installs.
+3. Improve Markdown styling in the TUI if the current plain terminal rendering feels too sparse.
 
 ## Update Rule
 
