@@ -11,153 +11,6 @@ Code Base is a Rust CLI/TUI app with two binaries:
 - A terminal for the TUI.
 - `nvim` on `PATH` if you use the default editor. You can configure another editor.
 
-## Build
-
-```bash
-cargo build
-```
-
-Build release binaries:
-
-```bash
-cargo build --release
-```
-
-Debug binaries are written to:
-
-```text
-target/debug/cb
-target/debug/cb-tui
-```
-
-Release binaries are written to:
-
-```text
-target/release/cb
-target/release/cb-tui
-```
-
-## Run The CLI
-
-Because the package has two binaries, use `--bin` when running through Cargo:
-
-```bash
-cargo run --bin cb -- --help
-```
-
-Register the current directory:
-
-```bash
-cargo run --bin cb -- init
-```
-
-Register a specific project without prompts:
-
-```bash
-cargo run --bin cb -- init ~/work/my-project --name "My Project" --tag work --no-prompt
-```
-
-List projects:
-
-```bash
-cargo run --bin cb -- list
-```
-
-Search projects:
-
-```bash
-cargo run --bin cb -- search api
-```
-
-Open a project:
-
-```bash
-cargo run --bin cb -- open api
-```
-
-View project docs:
-
-```bash
-cargo run --bin cb -- doc api
-```
-
-## Run The TUI
-
-Run through the main CLI:
-
-```bash
-cargo run --bin cb -- tui
-```
-
-Or run the dedicated TUI binary:
-
-```bash
-cargo run --bin cb-tui
-```
-
-Inside the TUI:
-
-- Type to search.
-- `Enter` opens the selected project.
-- `1` selects Docs.
-- `2` selects Tree.
-- `Tab` switches focus.
-- `Ctrl+r` cycles sort mode.
-- `Ctrl+o` toggles sort order.
-- `d` opens or creates the selected project docs.
-- `e` edits selected project metadata.
-- `q` exits.
-
-## Use An Isolated Registry
-
-For testing without touching your real registry/config:
-
-```bash
-tmp="$(mktemp -d)"
-mkdir -p "$tmp/data" "$tmp/config" "$tmp/project"
-printf '# Demo\n' > "$tmp/project/README.md"
-
-CODEBASE_DATA_DIR="$tmp/data" \
-CODEBASE_CONFIG_DIR="$tmp/config" \
-cargo run --bin cb -- init "$tmp/project" --name Demo --no-prompt
-
-CODEBASE_DATA_DIR="$tmp/data" \
-CODEBASE_CONFIG_DIR="$tmp/config" \
-cargo run --bin cb -- list
-
-CODEBASE_DATA_DIR="$tmp/data" \
-CODEBASE_CONFIG_DIR="$tmp/config" \
-cargo run --bin cb-tui
-```
-
-## Configure The Editor
-
-Default editor is `nvim`.
-
-Set a different simple editor:
-
-```bash
-cargo run --bin cb -- config set editor code
-```
-
-Set a custom command template:
-
-```bash
-cargo run --bin cb -- config set editor_command 'tmux new-window -c {path} nvim .'
-```
-
-For project opening, `{path}` is the project directory. For docs editing, `{path}` is the docs file.
-
-## Verify The Project
-
-Run formatting, tests, and lint checks:
-
-```bash
-cargo fmt --check
-cargo test
-cargo clippy --all-targets -- -D warnings
-```
-
 ## Install Locally
 
 The install scripts are distro-neutral POSIX shell scripts. They install from this checkout using Cargo, so they work on any Linux distro with Rust/Cargo installed.
@@ -224,4 +77,153 @@ After install:
 ```bash
 cb --help
 cb-tui --help
+```
+
+## Build
+
+Build commands are only needed for development. Normal usage after install uses `cb` and `cb-tui`.
+
+```bash
+cargo build
+```
+
+Build release binaries:
+
+```bash
+cargo build --release
+```
+
+Debug binaries are written to:
+
+```text
+target/debug/cb
+target/debug/cb-tui
+```
+
+Release binaries are written to:
+
+```text
+target/release/cb
+target/release/cb-tui
+```
+
+## Run The CLI
+
+Show help:
+
+```bash
+cb --help
+```
+
+Register the current directory:
+
+```bash
+cb init
+```
+
+Register a specific project without prompts:
+
+```bash
+cb init ~/work/my-project --name "My Project" --tag work --no-prompt
+```
+
+List projects:
+
+```bash
+cb list
+```
+
+Search projects:
+
+```bash
+cb search api
+```
+
+Open a project:
+
+```bash
+cb open api
+```
+
+View project docs:
+
+```bash
+cb doc api
+```
+
+## Run The TUI
+
+Run through the main CLI:
+
+```bash
+cb tui
+```
+
+Or run the dedicated TUI binary:
+
+```bash
+cb-tui
+```
+
+Inside the TUI:
+
+- Type to search.
+- `Enter` opens the selected project.
+- `1` selects Docs.
+- `2` selects Tree.
+- `Tab` switches focus.
+- `Ctrl+r` cycles sort mode.
+- `Ctrl+o` toggles sort order.
+- `d` opens or creates the selected project docs.
+- `e` edits selected project metadata.
+- `q` exits.
+
+## Use An Isolated Registry
+
+For testing without touching your real registry/config:
+
+```bash
+tmp="$(mktemp -d)"
+mkdir -p "$tmp/data" "$tmp/config" "$tmp/project"
+printf '# Demo\n' > "$tmp/project/README.md"
+
+CODEBASE_DATA_DIR="$tmp/data" \
+CODEBASE_CONFIG_DIR="$tmp/config" \
+cb init "$tmp/project" --name Demo --no-prompt
+
+CODEBASE_DATA_DIR="$tmp/data" \
+CODEBASE_CONFIG_DIR="$tmp/config" \
+cb list
+
+CODEBASE_DATA_DIR="$tmp/data" \
+CODEBASE_CONFIG_DIR="$tmp/config" \
+cb-tui
+```
+
+## Configure The Editor
+
+Default editor is `nvim`.
+
+Set a different simple editor:
+
+```bash
+cb config set editor code
+```
+
+Set a custom command template:
+
+```bash
+cb config set editor_command 'tmux new-window -c {path} nvim .'
+```
+
+For project opening, `{path}` is the project directory. For docs editing, `{path}` is the docs file.
+
+## Verify The Project
+
+Run formatting, tests, and lint checks:
+
+```bash
+cargo fmt --check
+cargo test
+cargo clippy --all-targets -- -D warnings
 ```
