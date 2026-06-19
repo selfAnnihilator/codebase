@@ -24,36 +24,97 @@ After installing Cargo, rerun:
 EOF
 }
 
+path_contains_dir() {
+    dir=$1
+    case ":$PATH:" in
+        *":$dir:"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+bin_dir_writable_or_creatable() {
+    dir=$1
+    if [ -d "$dir" ]; then
+        [ -w "$dir" ]
+        return
+    fi
+
+    parent=$(dirname -- "$dir")
+    [ -d "$parent" ] && [ -w "$parent" ]
+}
+
+choose_install_bin_dir() {
+    if [ "${INSTALL_BIN_DIR:-}" ]; then
+        printf '%s\n' "$INSTALL_BIN_DIR"
+        return
+    fi
+
+    if path_contains_dir "$HOME/.local/bin" && bin_dir_writable_or_creatable "$HOME/.local/bin"; then
+        printf '%s\n' "$HOME/.local/bin"
+        return
+    fi
+
+    if path_contains_dir "/usr/local/bin" && bin_dir_writable_or_creatable "/usr/local/bin"; then
+        printf '%s\n' "/usr/local/bin"
+        return
+    fi
+
+    old_ifs=$IFS
+    IFS=:
+    for dir in $PATH; do
+        [ -n "$dir" ] || continue
+        case "$dir" in
+            */bin)
+                if bin_dir_writable_or_creatable "$dir"; then
+                    printf '%s\n' "$dir"
+                    IFS=$old_ifs
+                    return
+                fi
+                ;;
+        esac
+    done
+    IFS=$old_ifs
+
+    cat >&2 <<'EOF'
+error: could not find a writable bin directory on PATH.
+
+Try one of these:
+  1. Create a user bin directory that is on PATH, such as ~/.local/bin
+  2. Re-run with a writable override:
+     INSTALL_BIN_DIR="$HOME/.local/bin" ./scripts/install.sh
+  3. Re-run for a system-wide install:
+     sudo INSTALL_BIN_DIR=/usr/local/bin ./scripts/install.sh
+EOF
+    exit 1
+}
+
 if ! command -v cargo >/dev/null 2>&1; then
     print_cargo_help
     exit 1
 fi
 
-cargo_home=${CARGO_HOME:-"$HOME/.cargo"}
-cargo_bin="$cargo_home/bin"
+install_bin_dir=$(choose_install_bin_dir)
+install_root=$(dirname -- "$install_bin_dir")
+
+case "$install_bin_dir" in
+    */bin) ;;
+    *)
+        echo "error: install bin directory must end with /bin: $install_bin_dir" >&2
+        exit 1
+        ;;
+esac
+
+mkdir -p "$install_bin_dir"
 
 echo "Installing Code Base from $repo_root"
-cargo install --path "$repo_root" --force --locked
+echo "Install location: $install_bin_dir"
+cargo install --path "$repo_root" --force --locked --root "$install_root"
 
-cb_path=
-cb_tui_path=
+cb_path="$install_bin_dir/cb"
+cb_tui_path="$install_bin_dir/cb-tui"
 
-if [ -x "$cargo_bin/cb" ]; then
-    cb_path=$cargo_bin/cb
-elif command -v cb >/dev/null 2>&1; then
-    cb_path=$(command -v cb)
-fi
-
-if [ -x "$cargo_bin/cb-tui" ]; then
-    cb_tui_path=$cargo_bin/cb-tui
-elif command -v cb-tui >/dev/null 2>&1; then
-    cb_tui_path=$(command -v cb-tui)
-fi
-
-if [ -z "$cb_path" ] || [ -z "$cb_tui_path" ]; then
-    echo "warning: install completed, but installed commands were not found on PATH" >&2
-    echo "Add Cargo's bin directory to PATH:" >&2
-    echo "  export PATH=\"$cargo_bin:\$PATH\"" >&2
+if [ ! -x "$cb_path" ] || [ ! -x "$cb_tui_path" ]; then
+    echo "error: install completed, but expected binaries were not found in $install_bin_dir" >&2
     exit 1
 fi
 
@@ -64,12 +125,9 @@ echo "Installed:"
 echo "  cb: $cb_path"
 echo "  cb-tui: $cb_tui_path"
 
-case ":$PATH:" in
-    *":$cargo_bin:"*) ;;
-    *)
-        echo
-        echo "Cargo's bin directory is not on PATH for this shell."
-        echo "Add it with:"
-        echo "  export PATH=\"$cargo_bin:\$PATH\""
-        ;;
-esac
+if ! path_contains_dir "$install_bin_dir"; then
+    echo
+    echo "warning: install directory is not on PATH for this shell."
+    echo "Add it with:"
+    echo "  export PATH=\"$install_bin_dir:\$PATH\""
+fi

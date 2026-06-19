@@ -13,7 +13,7 @@ Code Base is a Rust CLI/TUI app with two binaries:
 
 ## Install Locally
 
-The install scripts are distro-neutral POSIX shell scripts. They install from this checkout using Cargo, so they work on any Linux distro with Rust/Cargo installed.
+The install scripts are distro-neutral POSIX shell scripts. They install from this checkout using Cargo into a real `PATH` bin directory, so `cb` and `cb-tui` are ready to use immediately on normal Linux setups.
 
 Install Rust and Cargo with rustup:
 
@@ -49,14 +49,31 @@ Install both binaries:
 ./scripts/install.sh
 ```
 
-This installs the Cargo package from the current checkout and provides:
+By default the script installs into a writable `bin` directory that is already on `PATH`, preferring:
+
+```text
+~/.local/bin
+/usr/local/bin
+```
+
+This provides:
 
 ```text
 cb
 cb-tui
 ```
 
-If Cargo's bin directory is not on `PATH`, the script prints the exact `export PATH=...` line to add.
+For an explicit target directory:
+
+```bash
+INSTALL_BIN_DIR="$HOME/.local/bin" ./scripts/install.sh
+```
+
+For a system-wide install:
+
+```bash
+sudo INSTALL_BIN_DIR=/usr/local/bin ./scripts/install.sh
+```
 
 Uninstall the binaries:
 

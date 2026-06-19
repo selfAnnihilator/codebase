@@ -1,7 +1,7 @@
 use super::*;
 use crate::storage::TreeConfig;
 use crate::tui::{
-    EditorInvocation, TuiApp, format_project_row, generate_tree_lines, handle_tui_key,
+    EditorInvocation, TuiApp, TuiFocus, format_project_row, generate_tree_lines, handle_tui_key,
     load_docs_preview, match_segments, next_sort_mode, shell_quote_path, tui_project_matches,
 };
 use tempfile::TempDir;
@@ -491,6 +491,53 @@ fn esc_outside_tui_search_does_not_quit_but_q_does() {
 }
 
 #[test]
+fn ctrl_c_quits_tui_immediately() {
+    let registry = registry();
+    let config = Config::default();
+    let mut app = TuiApp::new(&registry, &config).unwrap();
+    let (_config_dir, path) = config_path();
+
+    let ctrl_c_quit = handle_tui_key(
+        key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &path,
+    )
+    .unwrap();
+
+    assert!(ctrl_c_quit);
+}
+
+#[test]
+fn vim_h_l_switch_tui_focus() {
+    let registry = registry();
+    let config = Config::default();
+    let mut app = TuiApp::new(&registry, &config).unwrap();
+    let (_config_dir, path) = config_path();
+
+    handle_tui_key(
+        key(KeyCode::Char('l')),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &path,
+    )
+    .unwrap();
+    assert_eq!(app.focus, TuiFocus::Preview);
+
+    handle_tui_key(
+        key(KeyCode::Char('h')),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &path,
+    )
+    .unwrap();
+    assert_eq!(app.focus, TuiFocus::Left);
+}
+
+#[test]
 fn delete_key_removes_tui_project_registry_entry_after_confirmation() {
     let registry = registry();
     let (_dir, path) = temp_project();
@@ -685,6 +732,38 @@ fn tui_search_selection_moves_within_filtered_results() {
 }
 
 #[test]
+fn vim_j_k_move_selection_like_arrows() {
+    let registry = registry();
+    let (_dir1, path1) = temp_project();
+    insert_named(&registry, "API Server", path1, &["backend"]);
+    let (_dir2, path2) = temp_project();
+    insert_named(&registry, "API Client", path2, &["frontend"]);
+    let config = Config::default();
+    let mut app = TuiApp::new(&registry, &config).unwrap();
+    let (_config_dir, path) = config_path();
+
+    handle_tui_key(
+        key(KeyCode::Char('j')),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &path,
+    )
+    .unwrap();
+    assert_eq!(app.selected, 1);
+
+    handle_tui_key(
+        key(KeyCode::Char('k')),
+        &mut app,
+        &registry,
+        &mut config.clone(),
+        &path,
+    )
+    .unwrap();
+    assert_eq!(app.selected, 0);
+}
+
+#[test]
 fn tui_project_row_shows_name_tags_and_path() {
     let registry = registry();
     let (_dir, path) = temp_project();
@@ -702,7 +781,10 @@ fn tui_project_row_shows_name_tags_and_path() {
 
     assert_eq!(
         row,
-        format!("API Server\ntag: backend\npath: {}", display_path(&path))
+        format!(
+            "API Server [git]\ntag: backend\npath: {}",
+            display_path(&path)
+        )
     );
 }
 

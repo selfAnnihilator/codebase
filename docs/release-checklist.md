@@ -29,10 +29,11 @@ Run an isolated install smoke:
 
 ```bash
 tmp="$(mktemp -d)"
-CARGO_HOME="$tmp/cargo" ./scripts/install.sh
-"$tmp/cargo/bin/cb" --help >/dev/null
-"$tmp/cargo/bin/cb-tui" --help >/dev/null
-CARGO_HOME="$tmp/cargo" ./scripts/uninstall.sh
+mkdir -p "$tmp/bin"
+PATH="$tmp/bin:$PATH" INSTALL_BIN_DIR="$tmp/bin" ./scripts/install.sh
+"$tmp/bin/cb" --help >/dev/null
+"$tmp/bin/cb-tui" --help >/dev/null
+INSTALL_BIN_DIR="$tmp/bin" ./scripts/uninstall.sh
 ```
 
 ## Manual Smoke

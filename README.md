@@ -23,6 +23,14 @@ Install from this checkout:
 ./scripts/install.sh
 ```
 
+The script installs into a real `PATH` bin directory, preferring `~/.local/bin` and then `/usr/local/bin`.
+
+For a system-wide install:
+
+```bash
+sudo INSTALL_BIN_DIR=/usr/local/bin ./scripts/install.sh
+```
+
 Uninstall:
 
 ```bash

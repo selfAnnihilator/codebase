@@ -502,6 +502,10 @@ pub(super) fn handle_tui_key(
     config: &mut Config,
     config_path: &Path,
 ) -> Result<bool> {
+    if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
+        return Ok(true);
+    }
+
     if handle_tui_prompt_key(key, app, registry, config)? {
         return Ok(false);
     }
@@ -567,6 +571,12 @@ pub(super) fn handle_tui_key(
                 TuiFocus::Preview => TuiFocus::Left,
             };
         }
+        KeyCode::Left | KeyCode::Char('h') => {
+            app.focus = TuiFocus::Left;
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            app.focus = TuiFocus::Preview;
+        }
         KeyCode::Char('/') => {
             app.search_active = true;
             app.focus = TuiFocus::Left;
@@ -587,7 +597,7 @@ pub(super) fn handle_tui_key(
         KeyCode::Delete => {
             start_remove_entry_prompt(app);
         }
-        KeyCode::Up => {
+        KeyCode::Up | KeyCode::Char('k') => {
             if app.focus == TuiFocus::Left {
                 app.selected = app.selected.saturating_sub(1);
                 app.reset_preview_scroll();
@@ -595,7 +605,7 @@ pub(super) fn handle_tui_key(
                 decrement_preview_scroll(app);
             }
         }
-        KeyCode::Down => {
+        KeyCode::Down | KeyCode::Char('j') => {
             if app.focus == TuiFocus::Left {
                 if app.selected + 1 < app.filtered.len() {
                     app.selected += 1;
@@ -909,10 +919,16 @@ pub(super) fn format_project_row(project: &Project) -> String {
     } else {
         project.tags.join(", ")
     };
+    let git = if project.git_root.is_some() {
+        " [git]"
+    } else {
+        ""
+    };
     let missing = if project.missing { " [missing]" } else { "" };
     format!(
-        "{}\ntag: {}\npath: {}{}",
+        "{}{}\ntag: {}\npath: {}{}",
         project.name,
+        git,
         tags,
         display_path(&project.path),
         missing
